@@ -14,7 +14,7 @@ function openAiFactory(spec: ModelSpec): Promise<BaseChatModel> {
       apiKey: spec.apiKey,
       temperature: spec.temperature ?? 0,
       ...(spec.baseURL ? { configuration: { baseURL: spec.baseURL } } : {}),
-    }) as unknown as BaseChatModel,
+    }),
   );
 }
 
