@@ -544,7 +544,7 @@ import type { LogLevel } from '../shared/index.js';
 const EnvSchema = z.object({
   LLM_PROVIDER: z.string().min(1),
   LLM_MODEL: z.string().min(1),
-  LLM_BASE_URL: z.string().url(),
+  LLM_BASE_URL: z.url(),
   LLM_API_KEY: z.string().min(1),
   LLM_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
 
@@ -559,7 +559,7 @@ const EnvSchema = z.object({
   A2A_PEERS: z.string().min(1).default('config/a2a.peers.json'),
 
   A2A_PORT: z.coerce.number().int().min(1).max(65_535).default(4124),
-  A2A_PUBLIC_URL: z.string().url().default('http://localhost:4124'),
+  A2A_PUBLIC_URL: z.url().default('http://localhost:4124'),
   A2A_AGENT_NAME: z.string().min(1).default('muliuniuma'),
   A2A_DESCRIPTION: z.string().min(1).default('可扩展的 TypeScript Agent 运行时'),
 
@@ -590,6 +590,14 @@ export interface AppConfig {
     description: string;
   };
   logLevel: LogLevel;
+}
+
+export function loadEnvFileIfPresent(file = '.env'): void {
+  try {
+    process.loadEnvFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
@@ -633,6 +641,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 ```
 
 zod v4 的 `safeParse` 错误结构是 `error.issues`，每项有 `path` 与 `message`。
+
+实现说明（Task 3 评审后的实际落地，与上方代码的差异）：
+
+- `z.string().url()` 在 zod v4.6.7 已废弃，实际实现用等价的顶层 `z.url()`。
+- `loadEnvFileIfPresent` 只吞 `ENOENT`（文件缺失），存在但读不了必须抛出，否则「配置缺失」会掩盖「权限不足」。
+- `loadConfig` 保持纯函数（可注入 env、不读文件、不改 `process.env`）；`.env` 由入口在调用前显式加载。
+- 测试除简报的 4 个用例外，还覆盖：错误类型与 `code` 断言、`loadConfig()` 默认参数路径（读真实 `process.env`，用保存-恢复模式清理）。
 
 - [ ] **Step 4: 实现 `src/config/index.ts`**
 
