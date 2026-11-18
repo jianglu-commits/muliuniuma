@@ -13,12 +13,16 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 /**
  * 未识别的 level 必须 fail closed：回退到 info 阈值，
  * 避免未知配置把 debug（含 LLM 载荷）全量打进 stderr。
+ * 查表只认自有属性，否则 'constructor'/'toString' 等 Object.prototype
+ * 继承键会取到函数而非 undefined，导致阈值变 NaN 而重新 fail-open。
  */
 const FALLBACK_LEVEL: LogLevel = 'info';
 
 function resolveThreshold(level: string): number {
-  const orders: Record<string, number> = LEVEL_ORDER;
-  return orders[level] ?? LEVEL_ORDER[FALLBACK_LEVEL];
+  if (Object.hasOwn(LEVEL_ORDER, level)) {
+    return LEVEL_ORDER[level as LogLevel];
+  }
+  return LEVEL_ORDER[FALLBACK_LEVEL];
 }
 
 /**

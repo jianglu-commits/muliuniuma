@@ -80,4 +80,42 @@ describe('createLogger', () => {
     expect(String(spy.mock.calls[1]?.[0])).toContain('kept-warn');
     expect(String(spy.mock.calls[2]?.[0])).toContain('kept-error');
   });
+
+  it('原型链上的 level 取值（constructor/toString）同样 fail closed', () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const ctorLogger = createLogger('constructor' as unknown as LogLevel, 'scope');
+    ctorLogger.debug('suppressed');
+    expect(spy).not.toHaveBeenCalled();
+    ctorLogger.info('kept-info');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]?.[0])).toContain('kept-info');
+
+    spy.mockClear();
+    const toStringLogger = createLogger('toString' as unknown as LogLevel, 'scope');
+    toStringLogger.debug('suppressed');
+    expect(spy).not.toHaveBeenCalled();
+    toStringLogger.info('kept-info');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]?.[0])).toContain('kept-info');
+  });
+
+  it('silent 级别下所有日志都不输出', () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const log = createLogger('silent', 'scope');
+    log.debug('d');
+    log.info('i');
+    log.warn('w');
+    log.error('e');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('child 保持父级的 level', () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const child = createLogger('warn', 'parent').child('child');
+    child.info('suppressed');
+    expect(spy).not.toHaveBeenCalled();
+    child.warn('kept');
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]?.[0])).toContain('kept');
+  });
 });
