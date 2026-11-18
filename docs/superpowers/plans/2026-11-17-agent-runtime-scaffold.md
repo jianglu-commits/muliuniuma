@@ -2864,11 +2864,12 @@ export const tools = [
 ```ts
 import { createInterface } from 'node:readline/promises';
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from './config/index.js';
+import { loadConfig, loadEnvFileIfPresent } from './config/index.js';
 import { AgentRuntime } from './agent/index.js';
 import { createLogger } from './shared/index.js';
 
 async function main(): Promise<void> {
+  loadEnvFileIfPresent();
   const config = loadConfig();
   const logger = createLogger(config.logLevel, 'cli');
 
@@ -2906,13 +2907,14 @@ main().catch((error: unknown) => {
 - [ ] **Step 4: 写 `src/serve.ts`**
 
 ```ts
-import { loadConfig } from './config/index.js';
+import { loadConfig, loadEnvFileIfPresent } from './config/index.js';
 import { AgentRuntime } from './agent/index.js';
 import { buildAgentCard } from './a2a/index.js';
 import { createA2AServer } from './a2a/index.js';
 import { createLogger } from './shared/index.js';
 
 async function main(): Promise<void> {
+  loadEnvFileIfPresent();
   const config = loadConfig();
   const logger = createLogger(config.logLevel, 'serve');
 
