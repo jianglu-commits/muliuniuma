@@ -5,7 +5,7 @@ import type { LogLevel } from '../shared/index.js';
 const EnvSchema = z.object({
   LLM_PROVIDER: z.string().min(1),
   LLM_MODEL: z.string().min(1),
-  LLM_BASE_URL: z.string().url(),
+  LLM_BASE_URL: z.url(),
   LLM_API_KEY: z.string().min(1),
   LLM_TEMPERATURE: z.coerce.number().min(0).max(2).default(0),
 
@@ -20,7 +20,7 @@ const EnvSchema = z.object({
   A2A_PEERS: z.string().min(1).default('config/a2a.peers.json'),
 
   A2A_PORT: z.coerce.number().int().min(1).max(65_535).default(4124),
-  A2A_PUBLIC_URL: z.string().url().default('http://localhost:4124'),
+  A2A_PUBLIC_URL: z.url().default('http://localhost:4124'),
   A2A_AGENT_NAME: z.string().min(1).default('muliuniuma'),
   A2A_DESCRIPTION: z.string().min(1).default('可扩展的 TypeScript Agent 运行时'),
 
@@ -96,11 +96,16 @@ export function loadConfig(
 
 /**
  * 加载 .env 文件（若存在）。已存在的环境变量优先，不会被文件内容覆盖。
+ *
+ * 只有「文件不存在」（ENOENT）会被静默忽略；文件存在但读不了（权限不足、
+ * 路径是目录、路径类型非法等）会继续抛出，避免把「配置读不到」误报成「配置缺失」。
  */
 export function loadEnvFileIfPresent(file = '.env'): void {
   try {
     process.loadEnvFile(file);
-  } catch {
-    // .env 不存在是正常情况，忽略
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
   }
 }
