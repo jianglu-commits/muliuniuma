@@ -1,3 +1,5 @@
+import { inspect } from 'node:util';
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
@@ -8,6 +10,26 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   silent: 100,
 };
 
+/**
+ * 未识别的 level 必须 fail closed：回退到 info 阈值，
+ * 避免未知配置把 debug（含 LLM 载荷）全量打进 stderr。
+ */
+const FALLBACK_LEVEL: LogLevel = 'info';
+
+function resolveThreshold(level: string): number {
+  const orders: Record<string, number> = LEVEL_ORDER;
+  return orders[level] ?? LEVEL_ORDER[FALLBACK_LEVEL];
+}
+
+/**
+ * 渲染 rest 参数：字符串原样输出，其余值用 node:util 的 inspect 保真格式化，
+ * 保留对象结构与 Error 堆栈，避免 String(x) 退化成 "[object Object]"。
+ */
+function renderArg(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return inspect(value, { depth: null, breakLength: Infinity, colors: false });
+}
+
 export interface Logger {
   debug(message: string, ...rest: unknown[]): void;
   info(message: string, ...rest: unknown[]): void;
@@ -17,7 +39,7 @@ export interface Logger {
 }
 
 export function createLogger(level: LogLevel, scope = 'app'): Logger {
-  const threshold = LEVEL_ORDER[level];
+  const threshold = resolveThreshold(level);
 
   const emit = (
     lvl: Exclude<LogLevel, 'silent'>,
@@ -25,10 +47,8 @@ export function createLogger(level: LogLevel, scope = 'app'): Logger {
     rest: unknown[],
   ): void => {
     if (LEVEL_ORDER[lvl] < threshold) return;
-    const line = `[${lvl}] ${scope}: ${message}\n`;
-    process.stderr.write(
-      rest.length > 0 ? `${line}${rest.map((r) => String(r)).join(' ')}\n` : line,
-    );
+    const suffix = rest.length > 0 ? ` ${rest.map(renderArg).join(' ')}` : '';
+    process.stderr.write(`[${lvl}] ${scope}: ${message}${suffix}\n`);
   };
 
   return {
