@@ -55,10 +55,13 @@
 | `@types/node` | ^24 | 对齐 `.nvmrc`；不用 26.x，避免引入本机不存在版本的 API 类型 |
 | `@types/express` | 5.0.6 | 对齐 express 5 |
 
-已确认的导入路径（非推测）：
-- `langchain/chat_models/universal` → `initChatModel`
-- `@langchain/langgraph/prebuilt` → `createReactAgent`
-- `@a2a-js/sdk/server`、`@a2a-js/sdk/server/express`、`@a2a-js/sdk/client`
+已确认的导入路径（非推测，均读自本地 `node_modules` 的 `.d.ts`）：
+- `langchain` → `createAgent`、`tool`（实际使用）
+- `@langchain/langgraph/prebuilt` → `createReactAgent`（已 `@deprecated`，不使用）
+- `langchain/chat_models/universal` → `initChatModel`（备用，首版不采用）
+- `@langchain/langgraph-checkpoint-sqlite` → `SqliteSaver`
+- `@langchain/mcp-adapters` → `MCPAdapter`
+- `@a2a-js/sdk`、`@a2a-js/sdk/server`、`@a2a-js/sdk/server/express`、`@a2a-js/sdk/client`
 
 ## 5. 目录结构
 
@@ -91,7 +94,7 @@ muliuniuma/
 │  │  └─ index.ts
 │  ├─ llm/
 │  │  ├─ types.ts             # ModelSpec
-│  │  ├─ factory.ts           # createChatModel：注册表 + initChatModel
+│  │  ├─ factory.ts           # createChatModel：provider 注册表
 │  │  └─ index.ts
 │  ├─ sandbox/
 │  │  ├─ types.ts             # Sandbox / ExecResult
@@ -118,8 +121,7 @@ muliuniuma/
 │  │  ├─ sandbox-tool.ts      # sandbox_exec / sandbox_write_file
 │  │  └─ index.ts
 │  ├─ agent/
-│  │  ├─ state.ts             # AgentState
-│  │  ├─ graph.ts             # createReactAgent 装配
+│  │  ├─ tools.ts             # 工具合并：按来源优先级去重改名
 │  │  ├─ runtime.ts           # AgentRuntime：唯一装配点
 │  │  └─ index.ts
 │  ├─ cli.ts                   # 入口 1：本地 REPL
@@ -153,11 +155,17 @@ export interface ModelSpec {
 }
 
 // src/llm/factory.ts
-export function registerProvider(id: ProviderId, f: (spec: ModelSpec) => BaseChatModel): void;
-export function createChatModel(spec: ModelSpec): BaseChatModel;
+export type ChatModelFactory = (spec: ModelSpec) => Promise<BaseChatModel>;
+
+export function registerProvider(id: ProviderId, f: ChatModelFactory): void;
+export function createChatModel(spec: ModelSpec): Promise<BaseChatModel>;
 ```
 
-首版注册表含 `openai` 与 `openai-compatible` 两个 id，二者共用同一个 `ChatOpenAI` 实现，差别仅在 `baseURL` 默认值（前者用官方地址，后者要求 `.env` 显式给出）。这样 `.env.example` 里的 `LLM_PROVIDER=openai-compatible` 与注册表严格对应。`initChatModel` 作为回退路径，让未显式注册的 provider 也能通过 LangChain 官方解析链工作。新增厂商 = 装包 + 一行 `registerProvider`，不动调用方。
+首版注册表含 `openai` 与 `openai-compatible` 两个 id，二者共用同一个 `ChatOpenAI` 实现，差别仅在 `baseURL` 默认值（前者用官方地址，后者要求 `.env` 显式给出）。这样 `.env.example` 里的 `LLM_PROVIDER=openai-compatible` 与注册表严格对应。
+
+未注册的 provider **不走** `initChatModel` 的隐式解析，而是直接抛 `ProviderNotRegisteredError`，错误信息里指明需要装哪个包、到哪里注册一行代码。这比隐式回退更可控：厂商差异（参数名、鉴权方式、模型名映射）在各家的 `@langchain/*` 包里已经解决，注册表只是把「用哪家」的选择权显式交给调用方。代价是 `LLM_PROVIDER` 写错时不会自动纠正，而是立刻报明确错误——这正是我们想要的反馈。
+
+新增厂商 = 装包 + 一行 `registerProvider`，不动任何调用方代码。
 
 ### 6.2 Sandbox
 
@@ -214,21 +222,41 @@ allowed-tools: [sandbox_exec, echo]
 ### 6.4 MCP
 
 ```ts
-// src/mcp/hub.ts
+// src/mcp/hub.ts —— 包装 @langchain/mcp-adapters 的 MCPAdapter
 export class McpHub {
   static fromConfig(file: string): Promise<McpHub>;
-  tools(): Promise<StructuredTool[]>;   // 带 <server>__ 前缀
+  tools(): Promise<DynamicStructuredTool[]>;
   close(): Promise<void>;
 }
 ```
 
-配置文件为空数组或不存在时返回空工具集，不阻塞启动；单个 server 连接失败只记录告警并跳过该 server，不影响其余 server 与整体启动。
+已核实的 SDK 事实（读 `@langchain/mcp-adapters@2.0.3` 的 `dist/client.d.ts`、`dist/types.d.ts` 得到，非推测）：
+- 类名是 `MCPAdapter`，`MultiServerMCPClient` 只是同义别名导出；统一用 `MCPAdapter`。
+- 配置形状为 `{ servers: Record<string, Connection>, onConnectionError?: 'ignore' | 'throw' | handler }`；扁平的 `Record<string, Connection>` 形式已标记 `@deprecated`。
+- `onConnectionError` 默认值是 `'throw'`，与「单个 server 失败不阻塞启动」的要求冲突，**必须显式传 `'ignore'`**。
+- 取工具用 `await adapter.listTools()`；`getTools()` / `initializeConnections()` 均已废弃，不要用。
+- stdio 型 Connection 必填 `transport: 'stdio'`、`command`、`args`。
+
+配置文件为空对象或文件不存在时返回空工具集，不阻塞启动；单个 server 连接失败只记录告警并跳过该 server，不影响其余 server 与整体启动。
 
 ### 6.5 A2A
 
-Server 侧：`card.ts` 依配置生成 AgentCard（名称、描述、skills、capabilities），`executor.ts` 实现 SDK 的 executor 接口并把请求转成 `AgentRuntime.run()`，`server.ts` 用 express 挂载，暴露 `/.well-known/agent-card.json` 与消息端点。
+已核实的 SDK 事实（读 `@a2a-js/sdk@1.3.0` 的 `dist/server/index.d.ts`、`dist/server/express/index.d.ts`、`dist/client/index.d.ts`、`dist/index.d.ts` 得到）。1.x 与网上大量 0.x 教程差异很大，以下为准：
 
-Client 侧：`client.ts` 从 `config/a2a.peers.json` 读取远端 agent URL，拉取其 AgentCard 建立连接；`remote-tool.ts` 把每个远端 agent 包装成一个本地工具（`ask_<agentName>`），于是「调用别的 agent」对 LangGraph 而言就是普通工具调用，无需改编排逻辑。
+- **没有 `A2AExpressApp`**。express 层由 `@a2a-js/sdk/server/express` 的三个中间件工厂组成：`agentCardHandler({ agentCardProvider })` 发卡片、`jsonRpcHandler({ requestHandler, userBuilder })` 处理 JSON-RPC、`restHandler(...)` 处理 HTTP+JSON。
+- `UserBuilder.noAuthentication` 是一个**函数**（`() => Promise<UnauthenticatedUser>`），作为 `userBuilder` 直接传入，不要调用它。
+- `DefaultRequestHandler` 构造函数是**位置参数**：`new DefaultRequestHandler(agentCard, taskStore, agentExecutor, eventBusManager?, pushNotificationStore?, pushNotificationSender?, extendedAgentCardProvider?, signatureGenerator?, options?)`。不是 0.x 的对象字面量。
+- `InMemoryTaskStore` 从 `@a2a-js/sdk/server` 导出。
+- `AgentExecutor` 接口是 `{ execute(requestContext, eventBus), cancelTask(taskId, eventBus) }` —— 取消方法名是 `cancelTask`，不是 `cancel`。
+- 事件通过 `eventBus.publish(AgentEvent.message(msg))` / `AgentEvent.task(task)` / `AgentEvent.statusUpdate(evt)` 发布；`AgentEvent` 是工厂对象。SDK 强制要求**首个事件必须是 `task` 或 `message`**，以 `statusUpdate` 开头会被拒绝。
+- `RequestContext` 提供 `userMessage`、`taskId`、`contextId`。
+- A2A 的类型是 protobuf 风格：`Message`、`AgentCard` 等接口里多数字段是必填（可选字段写成 `T | undefined`），根入口同时导出同名的 `MessageFns` 运行时常量，但它只有 `fromJSON` / `toJSON` 两个方法，**不是带默认值的 builder**。因此我们自己写 `buildTextMessage()` / `buildAgentCard()` 两个显式填全字段的辅助函数，靠类型检查保证不漏字段。
+- `Role` 枚举值为 `ROLE_USER = 1` / `ROLE_AGENT = 2`；`TaskState` 为 `TASK_STATE_*` 前缀。
+- 卡片路径常量 `AGENT_CARD_PATH` 从根入口导出，直接用它挂载，不要硬编码字符串。
+
+Server 侧：`card.ts` 依配置构造完整 `AgentCard`（含 `supportedInterfaces`、`capabilities`、`securitySchemes`、`securityRequirements`、`defaultInputModes`、`defaultOutputModes`、`skills`），`executor.ts` 实现 `AgentExecutor` 并把请求转成 `AgentRuntime.run()`，`server.ts` 用 express 依次挂 `express.json()`、`agentCardHandler`、`jsonRpcHandler`。
+
+Client 侧：`client.ts` 用 `new ClientFactory().createFromUrl(baseUrl)`（默认自动取 `/.well-known/agent-card.json`）拿到 `Client`，调用 `client.sendMessage({ tenant, message, configuration, metadata })`，返回 `SendMessageResult = Message | Task`；peers 列表来自 `config/a2a.peers.json`。`remote-tool.ts` 把每个远端 agent 包装成本地工具（`ask_<agentName>`），于是「调用别的 agent」对编排层而言就是普通工具调用，不需要单独的编排逻辑。
 
 ## 7. 数据流
 
@@ -236,16 +264,21 @@ Client 侧：`client.ts` 从 `config/a2a.peers.json` 读取远端 agent URL，�
 cli.ts / serve.ts
       ↓
 AgentRuntime.create(config)          ← 唯一装配点
-      ├─ createChatModel(config.model)
+      ├─ createChatModel(config.model)          → Promise<BaseChatModel>
       ├─ McpHub.tools()                        ┐
       ├─ SkillRegistry.tools() + load_skill    ├─→ 合并、按名去重 → tools[]
       ├─ sandboxTool(sandbox)                  │
       └─ A2AClientHub.remoteTools()            ┘
       ↓
-createReactAgent(model, tools, { checkpointSaver: SqliteSaver, state })
+createAgent({ model, tools, systemPrompt, checkpointer: SqliteSaver })
       ↓
 model ⇄ tools 循环 → 最终 messages
 ```
+
+编排用 `langchain` v1 的 `createAgent`，已核实参数名为 `{ model, tools?, systemPrompt?, stateSchema?, checkpointer?, responseFormat? }`。
+不用 `@langchain/langgraph/prebuilt` 的 `createReactAgent`：它的 `CreateReactAgentParams` 在 1.x 里已标注 `@deprecated`，并明确要求迁到 `langchain` 包的 `CreateAgentParams`。新项目没有理由从废弃入口起步。
+
+provider 工厂约定返回 `Promise<BaseChatModel>`，为将来需要异步初始化（拉取凭证、协商端点）的 provider 留出余地。这个异步性会传导到整个装配链，`AgentRuntime.create()` 全链路 await。
 
 工具名冲突处理：优先级 builtin > skill > mcp > a2a，冲突时后者加数字后缀并记录告警。
 
@@ -301,8 +334,11 @@ LOG_LEVEL=info
 
 | 风险 | 应对 |
 |---|---|
-| `better-sqlite3` 在 Node 24 下无预构建二进制、需本地编译 | 机器已装 Xcode CLT，可编译；若失败则退回 Node 22+ 内置 `node:sqlite` 自实现 `BaseCheckpointSaver`，`Sandbox` 式接口隔离保证上层无感 |
-| `@a2a-js/sdk` 1.x server 端具体类名与 0.x 教程不一致 | 已确认 export 子路径（`/server`、`/server/express`、`/client`）；实现时以本地 `.d.ts` 为准，不照搬网上旧示例 |
+| ~~`better-sqlite3` 在 Node 24 下无法编译~~ | **已排除**：Node v24.19.0 下 `pnpm install` 已从源码编译成功（`gyp info ok`）。仍保留 `node:sqlite` 自实现 `BaseCheckpointSaver` 作为备选，但首版不需要 |
+| ~~`@a2a-js/sdk` 1.x server 端类名不确定~~ | **已排除**：全部 API 已逐条从本地 `.d.ts` 核实并写入 §6.5。实现时以 §6.5 为准，禁止照搬网上 0.x 示例（`A2AExpressApp`、对象字面量构造 `DefaultRequestHandler`、`cancel()` 都是错的） |
+| provider 工厂约定为异步 | `createChatModel` 返回 `Promise`，`AgentRuntime.create()` 全链路 async；测试里注意 await |
+| `MCPAdapter` 默认 `onConnectionError: 'throw'` | 显式传 `'ignore'`，否则一个坏掉的 MCP server 会让整个 agent 起不来 |
+| A2A protobuf 风格类型必填字段多 | 集中在 `buildTextMessage()` / `buildAgentCard()` 两个辅助函数里填全，靠 `tsc --noEmit` 兜底；不散落在各处构造 |
 | `@langchain/mcp-adapters` 2.x 依赖 MCP SDK v2 模块化包 | 不直接依赖 `@modelcontextprotocol/sdk` v1，统一走 adapters，避免两代 SDK 混用 |
 | 沙箱被误认为安全边界 | README 显著位置声明其非安全性；强隔离通过 `createSandbox` 换实现 |
 | 未装 anthropic/google provider 但用户在 `.env` 里写了 | `createChatModel` 对未注册 provider 抛出明确错误，提示需要安装哪个包 |
