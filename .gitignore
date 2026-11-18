@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.sandbox/
+.data/
+.env
+*.log
+.DS_Store
+
+.worktrees/
+.superpowers/
