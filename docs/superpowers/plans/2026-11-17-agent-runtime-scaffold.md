@@ -767,7 +767,7 @@ function openAiFactory(spec: ModelSpec): Promise<BaseChatModel> {
       apiKey: spec.apiKey,
       temperature: spec.temperature ?? 0,
       ...(spec.baseURL ? { configuration: { baseURL: spec.baseURL } } : {}),
-    }) as unknown as BaseChatModel,
+    }),
   );
 }
 
@@ -787,7 +787,9 @@ registerProvider('openai', openAiFactory);
 registerProvider('openai-compatible', openAiFactory);
 ```
 
-`ChatOpenAI` 的 `configuration.baseURL` 是 @langchain/openai v1 里指定自定义端点的正规位置。`as unknown as BaseChatModel` 是为了让 `@langchain/openai` 与 `@langchain/core` 的版本实例一致；若 `pnpm typecheck` 报类型不兼容，把 `openAiFactory` 的返回类型改成 `Promise<BaseChatModel>` 并删掉该断言，再看具体报错修。
+`ChatOpenAI` 的 `configuration.baseURL` 是 @langchain/openai v1 里指定自定义端点的正规位置（v1 里顶层没有 `baseURL` 字段，放顶层会静默不生效）。
+
+**实际落地不需要任何类型断言**：`@langchain/openai@1.8.4` 与顶层安装的是同一个物理 `@langchain/core@1.4.1` 实例，`BaseChatOpenAI extends BaseChatModel`，所以 `ChatOpenAI` 本身就是 `BaseChatModel` 的子类，直接向上转型即可。计划初稿里的 `as unknown as BaseChatModel` 会短路类型检查（万一将来两个包实例分裂，tsc 不会报错而问题推迟到运行时），已删除。
 
 - [ ] **Step 5: 实现 `src/llm/index.ts`**
 
