@@ -143,10 +143,13 @@ export class LocalProcessSandbox implements Sandbox {
       let spawnError: string | undefined;
 
       const timer = setTimeout(() => {
-        // 子进程可能已经退出、只是 close 事件还没送达（exit 早于 close）：
-        // 这时不能再标记超时，否则成功的命令会被报成 exitCode 124。
-        if (child.exitCode !== null || child.signalCode !== null) return;
-        timedOut = true;
+        // 主进程可能已经正常退出、只是 close 事件还没送达（exit 早于 close）：
+        // 这时不能标记超时，否则成功的命令会被报成 exitCode 124。
+        // 但杀组必须无条件执行：后台后代可能仍持有 stdout/stderr 管道，
+        // 不杀掉它们 close 就要等后代自然结束，exec 会绕过超时无限期挂起。
+        if (child.exitCode === null && child.signalCode === null) {
+          timedOut = true;
+        }
         killProcessGroup(child);
       }, timeoutMs);
 
@@ -162,7 +165,7 @@ export class LocalProcessSandbox implements Sandbox {
         resolvePromise({
           stdout: stdout.toText(),
           // spawn 失败的原因单独存放，不经过会被截断的输出缓冲，保证始终可见
-          stderr: spawnError === undefined ? stderrText : `${stderrText}${spawnError}`,
+          stderr: spawnError === undefined ? stderrText : `${stderrText}\n${spawnError}`,
           exitCode,
           timedOut,
         });

@@ -133,6 +133,26 @@ describe('LocalProcessSandbox', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('主 shell 先退出但后台后代持有管道时，exec 仍有界且后代被杀', async () => {
+    // 主 shell 立即 exit 0，两个后台任务持有 stdout/stderr 管道。
+    // 超时定时器必须仍然杀掉进程组（只是不标记超时），否则 close
+    // 要等 sleep 5 自然结束，exec 会绕过超时无限期挂起。
+    const marker = join(sandbox.workdir, 'descendant-alive.txt');
+    const startedAt = Date.now();
+    const result = await sandbox.exec(
+      `(sleep 1; echo alive > "${marker}") & sleep 5 & exit 0`,
+      { timeoutMs: 300 },
+    );
+    const elapsed = Date.now() - startedAt;
+    // 有界性：必须远小于后台 sleep 5 的时长
+    expect(elapsed).toBeLessThan(2_000);
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    // 后代真的被杀：打算在 1s 后写文件的子进程没能写出 marker
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('dispose 删除工作目录', async () => {
     const workdir = sandbox.workdir;
     await sandbox.dispose();
