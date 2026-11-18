@@ -829,12 +829,13 @@ git commit -m "feat: add pluggable LLM provider registry"
 - Create: `src/sandbox/types.ts`, `src/sandbox/local.ts`, `src/sandbox/index.ts`
 - Test: `tests/sandbox.local.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/sandbox.local.test.ts`**
+- [x] **Step 1: 写失败的测试 `tests/sandbox.local.test.ts`**
 
 ```ts
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { constants, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocalProcessSandbox } from '../src/sandbox/index.js';
 import { SandboxEscapeError } from '../src/shared/index.js';
@@ -853,7 +854,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await sandbox.dispose();
+  await sandbox?.dispose();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -873,6 +874,7 @@ describe('LocalProcessSandbox', () => {
   it('超时后终止命令并标记 timedOut', async () => {
     const result = await sandbox.exec('sleep 5', { timeoutMs: 300 });
     expect(result.timedOut).toBe(true);
+    expect(result.exitCode).toBe(124);
   });
 
   it('命令看不到宿主机的环境变量', async () => {
@@ -887,7 +889,24 @@ describe('LocalProcessSandbox', () => {
 
   it('超长输出被截断', async () => {
     const result = await sandbox.exec('head -c 100000 /dev/zero | tr "\\0" "a"');
+    expect(result.stdout.length).toBeGreaterThan(0);
     expect(result.stdout.length).toBeLessThanOrEqual(1_024);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(1_024);
+    expect(result.stdout).toContain('输出已截断');
+  });
+
+  it('多字节输出按字节截断而不是按字符截断', async () => {
+    const result = await sandbox.exec(
+      "i=0; while [ $i -lt 2000 ]; do printf '中'; i=$((i+1)); done",
+    );
+    expect(result.stdout.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(1_024);
+    expect(result.stdout).toContain('输出已截断');
+    const chars = result.stdout.split('中').length - 1;
+    expect(chars).toBeGreaterThan(0);
+    // 中文每字 3 字节，1024 字节上限只装得下约 341 个字；
+    // 若改成按字符截断，字符数会逼近字节上限（上面的 byteLength 断言也会同时失败）。
+    expect(chars).toBeLessThan(500);
   });
 
   it('writeFile 与 readFile 在工作目录内往返', async () => {
@@ -907,10 +926,157 @@ describe('LocalProcessSandbox', () => {
       SandboxEscapeError,
     );
   });
+
+  it('绝对路径的读写被拒绝', async () => {
+    await expect(sandbox.readFile('/etc/passwd')).rejects.toBeInstanceOf(
+      SandboxEscapeError,
+    );
+    await expect(sandbox.writeFile('/tmp/escape.txt', 'x')).rejects.toBeInstanceOf(
+      SandboxEscapeError,
+    );
+  });
+
+  it('看似越界但仍留在目录内的路径被允许', async () => {
+    await sandbox.writeFile('b.txt', 'inside');
+    const data = await sandbox.readFile('a/../b.txt');
+    expect(new TextDecoder().decode(data)).toBe('inside');
+  });
+
+  it('exec 的 cwd 越界被拒绝', async () => {
+    await expect(sandbox.exec('pwd', { cwd: '../' })).rejects.toBeInstanceOf(
+      SandboxEscapeError,
+    );
+    await expect(sandbox.exec('pwd', { cwd: '/etc' })).rejects.toBeInstanceOf(
+      SandboxEscapeError,
+    );
+  });
+
+  it('exec 可在工作目录的子目录中执行', async () => {
+    await sandbox.writeFile('sub/file.txt', 'x');
+    const result = await sandbox.exec('cat file.txt', { cwd: 'sub' });
+    expect(result.stdout.trim()).toBe('x');
+  });
+
+  it('超时会连同子进程一起终止', async () => {
+    const marker = join(sandbox.workdir, 'alive.txt');
+    const result = await sandbox.exec(`(sleep 1; echo alive > "${marker}") & sleep 5`, {
+      timeoutMs: 300,
+    });
+    expect(result.timedOut).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('主 shell 先退出但后台后代持有管道时，exec 仍有界且后代被杀', async () => {
+    // 主 shell 立即 exit 0，两个后台任务持有 stdout/stderr 管道。
+    // 超时定时器必须仍然杀掉进程组（只是不标记超时），否则 close
+    // 要等 sleep 5 自然结束，exec 会绕过超时无限期挂起。
+    const marker = join(sandbox.workdir, 'descendant-alive.txt');
+    const startedAt = Date.now();
+    const result = await sandbox.exec(
+      `(sleep 1; echo alive > "${marker}") & sleep 5 & exit 0`,
+      { timeoutMs: 300 },
+    );
+    const elapsed = Date.now() - startedAt;
+    // 有界性：必须远小于后台 sleep 5 的时长
+    expect(elapsed).toBeLessThan(2_000);
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    // 后代真的被杀：打算在 1s 后写文件的子进程没能写出 marker
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('dispose 删除工作目录', async () => {
+    const workdir = sandbox.workdir;
+    await sandbox.dispose();
+    expect(existsSync(workdir)).toBe(false);
+  });
+
+  it('id 越界或退化时拒绝创建沙箱，且不创建/删除 root 之外的目录', async () => {
+    const outside = join(dirname(root), 'sandbox-outside-probe');
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, 'keep.txt'), 'keep');
+    const neverCreated = join(dirname(root), 'sandbox-never-created');
+    try {
+      for (const id of ['..', '../..', '', '.', 'a/..']) {
+        const error = await LocalProcessSandbox.create({
+          id,
+          root,
+          timeoutMs: 5_000,
+          maxOutputBytes: 1_024,
+        }).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(SandboxEscapeError);
+        expect((error as Error).message).toContain(id);
+      }
+      // 越界目标不得被创建出来
+      const probeError = await LocalProcessSandbox.create({
+        id: '../sandbox-never-created',
+        root,
+        timeoutMs: 5_000,
+        maxOutputBytes: 1_024,
+      }).then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(probeError).toBeInstanceOf(SandboxEscapeError);
+      expect(existsSync(neverCreated)).toBe(false);
+      // root 之外的目录不得被 dispose 之类的递归删除波及
+      expect(existsSync(outside)).toBe(true);
+      expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
+      // 退化 id（'' / '.' / 'a/..'）不得让 dispose 把 root 自身或同级沙箱删掉
+      expect(existsSync(root)).toBe(true);
+      expect(existsSync(join(root, 'test'))).toBe(true);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(neverCreated, { recursive: true, force: true });
+    }
+  });
+
+  it('被信号杀死的命令不会被报成成功', async () => {
+    const result = await sandbox.exec('kill -9 $$');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.exitCode).not.toBe(124);
+    expect(result.exitCode).toBe(128 + constants.signals.SIGKILL);
+  });
+
+  it('名为 ..foo 的目录不被误判为越界', async () => {
+    await sandbox.writeFile('..foo/x.txt', 'dots');
+    const data = await sandbox.readFile('..foo/x.txt');
+    expect(new TextDecoder().decode(data)).toBe('dots');
+  });
+
+  it('命令已退出但 close 事件未送达时不会被误报为超时', async () => {
+    // 后台 sleep 持有 stdout 管道，close 要等它结束才触发；
+    // 主进程早已退出（exitCode 已有值），超时定时器不该再把它标成超时。
+    const result = await sandbox.exec('sleep 1 & exit 0', { timeoutMs: 400 });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it('spawn 失败的原因始终可见（不受输出上限影响）', async () => {
+    const tiny = await LocalProcessSandbox.create({
+      id: 'tiny',
+      root,
+      timeoutMs: 5_000,
+      maxOutputBytes: 16,
+    });
+    try {
+      // cwd 不存在 → spawn 直接失败
+      const result = await tiny.exec('echo hi', { cwd: 'no-such-dir' });
+      expect(result.exitCode).toBe(127);
+      expect(result.stderr).toContain('ENOENT');
+    } finally {
+      await tiny.dispose();
+    }
+  });
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/sandbox.local.test.ts
@@ -918,7 +1084,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/sandbox/index.js"`。
 
-- [ ] **Step 3: 实现 `src/sandbox/types.ts`**
+- [x] **Step 3: 实现 `src/sandbox/types.ts`**
 
 ```ts
 export interface ExecResult {
@@ -950,12 +1116,15 @@ export interface SandboxOptions {
 }
 ```
 
-- [ ] **Step 4: 实现 `src/sandbox/local.ts`**
+- [x] **Step 4: 实现 `src/sandbox/local.ts`**
 
 ```ts
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { constants } from 'node:os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { SandboxEscapeError } from '../shared/index.js';
 import type { ExecOptions, ExecResult, Sandbox, SandboxOptions } from './types.js';
 
@@ -965,10 +1134,65 @@ const BASE_ENV: Record<string, string> = {
   TERM: 'dumb',
 };
 
-function truncate(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, 'utf8');
-  if (buf.length <= maxBytes) return text;
-  return `${buf.subarray(0, maxBytes).toString('utf8')}\n...[输出已截断]`;
+const TRUNCATION_NOTICE = '\n...[输出已截断]';
+
+/**
+ * 采集子进程输出，超过上限后不再累积，避免大输出撑爆宿主进程内存。
+ */
+class OutputBuffer {
+  private readonly chunks: Buffer[] = [];
+  private size = 0;
+  private truncated = false;
+
+  constructor(private readonly maxBytes: number) {}
+
+  push(chunk: Buffer): void {
+    if (this.truncated) return;
+    const remaining = this.maxBytes - this.size;
+    if (chunk.length <= remaining) {
+      this.chunks.push(chunk);
+      this.size += chunk.length;
+      return;
+    }
+    if (remaining > 0) {
+      this.chunks.push(chunk.subarray(0, remaining));
+      this.size += remaining;
+    }
+    this.truncated = true;
+  }
+
+  toText(): string {
+    const raw = Buffer.concat(this.chunks);
+    if (!this.truncated) return raw.toString('utf8');
+    const noticeBytes = Buffer.byteLength(TRUNCATION_NOTICE, 'utf8');
+    if (noticeBytes >= this.maxBytes) return new StringDecoder('utf8').write(raw);
+    const keep = this.maxBytes - noticeBytes;
+    return `${new StringDecoder('utf8').write(raw.subarray(0, keep))}${TRUNCATION_NOTICE}`;
+  }
+}
+
+/**
+ * 进程被信号杀死时按 shell 惯例返回 128 + 信号编号（如 SIGKILL=9 → 137）。
+ */
+function signalExitCode(signal: NodeJS.Signals): number {
+  const number: number | undefined = constants.signals[signal];
+  return number === undefined ? 1 : 128 + number;
+}
+
+/**
+ * detached: true 让子进程自成进程组，超时时必须按组杀掉，
+ * 否则 sh -c "sleep 5" 派生的孙进程会变成孤儿继续运行。
+ */
+function killProcessGroup(child: ChildProcess): void {
+  if (child.pid === undefined) {
+    child.kill('SIGKILL');
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
 }
 
 export class LocalProcessSandbox implements Sandbox {
@@ -977,10 +1201,20 @@ export class LocalProcessSandbox implements Sandbox {
 
   private readonly timeoutMs: number;
   private readonly maxOutputBytes: number;
+  private readonly running = new Set<ChildProcess>();
 
   private constructor(options: SandboxOptions) {
+    const root = resolve(options.root);
+    const workdir = resolve(join(root, options.id));
+    // id 是公开字段，必须保证 workdir 是 root 的真子目录：
+    // id='..' 会把工作目录指到 root 之外，dispose() 就会递归删除那个目录；
+    // id='' / '.' 会让 workdir 等于 root 本身，dispose() 会连同级其他沙箱一起删掉。
+    const rel = relative(root, workdir);
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new SandboxEscapeError(options.id);
+    }
     this.id = options.id;
-    this.workdir = resolve(join(options.root, options.id));
+    this.workdir = workdir;
     this.timeoutMs = options.timeoutMs;
     this.maxOutputBytes = options.maxOutputBytes;
   }
@@ -991,13 +1225,20 @@ export class LocalProcessSandbox implements Sandbox {
     return sandbox;
   }
 
+  /**
+   * 把相对路径解析到 workdir 内部，越界即拒绝。
+   *
+   * 注意：这里刻意不解析符号链接。沙箱内用 `ln -s /etc passwd` 建的软链，
+   * readFile 会读到 workdir 之外的内容，writeFile 同样会跟随软链写到外部目标。
+   * 这是有意为之：本地进程隔离只用于约束误操作，不是安全边界。
+   */
   private resolveInside(relativePath: string): string {
     if (isAbsolute(relativePath)) {
       throw new SandboxEscapeError(relativePath);
     }
     const target = resolve(this.workdir, relativePath);
     const rel = relative(this.workdir, target);
-    if (rel.startsWith('..') || rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(rel)) {
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       throw new SandboxEscapeError(relativePath);
     }
     return target;
@@ -1014,49 +1255,68 @@ export class LocalProcessSandbox implements Sandbox {
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      this.running.add(child);
 
-      let stdout = '';
-      let stderr = '';
+      const stdout = new OutputBuffer(this.maxOutputBytes);
+      const stderr = new OutputBuffer(this.maxOutputBytes);
       let timedOut = false;
       let settled = false;
+      let spawnError: string | undefined;
 
       const timer = setTimeout(() => {
-        timedOut = true;
-        if (child.pid !== undefined) {
-          try {
-            process.kill(-child.pid, 'SIGKILL');
-          } catch {
-            child.kill('SIGKILL');
-          }
+        // 主进程可能已经正常退出、只是 close 事件还没送达（exit 早于 close）：
+        // 这时不能标记超时，否则成功的命令会被报成 exitCode 124。
+        // 但杀组必须无条件执行：后台后代可能仍持有 stdout/stderr 管道，
+        // 不杀掉它们 close 就要等后代自然结束，exec 会绕过超时无限期挂起。
+        if (child.exitCode === null && child.signalCode === null) {
+          timedOut = true;
         }
+        killProcessGroup(child);
       }, timeoutMs);
 
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString('utf8');
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString('utf8');
-      });
+      child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+      child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
 
       const settle = (exitCode: number): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        this.running.delete(child);
+        const stderrText = stderr.toText();
         resolvePromise({
-          stdout: truncate(stdout, this.maxOutputBytes),
-          stderr: truncate(stderr, this.maxOutputBytes),
+          stdout: stdout.toText(),
+          // spawn 失败的原因单独存放，不经过会被截断的输出缓冲，保证始终可见
+          stderr: spawnError === undefined ? stderrText : `${stderrText}\n${spawnError}`,
           exitCode,
           timedOut,
         });
       };
 
       child.on('error', (error) => {
-        stderr += `\n${error.message}`;
+        spawnError = error.message;
         settle(127);
       });
 
-      child.on('close', (code) => {
-        settle(code ?? (timedOut ? 124 : 0));
+      child.on('close', (code, signal) => {
+        if (spawnError !== undefined) {
+          settle(127);
+          return;
+        }
+        if (timedOut) {
+          settle(124);
+          return;
+        }
+        if (code !== null) {
+          settle(code);
+          return;
+        }
+        if (signal !== null) {
+          // 被信号杀死：返回 128 + 信号编号，不能回退到 0（那会把失败伪装成成功）
+          settle(signalExitCode(signal));
+          return;
+        }
+        // 既没有退出码也没有信号：进程没有正常结束，同样不能回退到 0
+        settle(1);
       });
     });
   }
@@ -1073,27 +1333,31 @@ export class LocalProcessSandbox implements Sandbox {
   }
 
   async dispose(): Promise<void> {
+    for (const child of this.running) {
+      killProcessGroup(child);
+    }
+    this.running.clear();
     await rm(this.workdir, { recursive: true, force: true });
   }
 }
 ```
 
-- [ ] **Step 5: 实现 `src/sandbox/index.ts`**
+- [x] **Step 5: 实现 `src/sandbox/index.ts`**
 
 ```ts
 export * from './types.js';
 export * from './local.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/sandbox.local.test.ts
 ```
 
-预期：PASS，8 个用例。若「超长输出被截断」失败，检查 truncate 是否按 UTF-8 字节截断（`Buffer.byteLength` 语义）。
+预期：PASS，21 个用例（简报 8 个 + 边界与修复轮新增 13 个）。输出截断按 UTF-8 字节封顶，且为截断提示预留字节，故 `Buffer.byteLength(stdout)` 与 `stdout.length` 均 ≤ 上限。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/sandbox tests/sandbox.local.test.ts
