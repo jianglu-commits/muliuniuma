@@ -42,13 +42,24 @@ describe('loadConfig', () => {
 });
 
 describe('loadEnvFileIfPresent', () => {
-  const touched: string[] = [];
+  const originalEnv = new Map<string, string | undefined>();
   const tempDirs: string[] = [];
 
-  afterEach(() => {
-    for (const key of touched.splice(0)) {
-      delete process.env[key];
+  const track = (key: string): void => {
+    if (!originalEnv.has(key)) {
+      originalEnv.set(key, process.env[key]);
     }
+  };
+
+  afterEach(() => {
+    for (const [key, value] of originalEnv) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    originalEnv.clear();
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -65,7 +76,8 @@ describe('loadEnvFileIfPresent', () => {
     tempDirs.push(dir);
     const file = join(dir, '.env');
     writeFileSync(file, 'CONFIG_ENV_FILE_ONLY_VAR=fromfile\n');
-    touched.push('CONFIG_ENV_FILE_ONLY_VAR');
+    track('CONFIG_ENV_FILE_ONLY_VAR');
+    delete process.env['CONFIG_ENV_FILE_ONLY_VAR'];
 
     loadEnvFileIfPresent(file);
 
@@ -77,7 +89,7 @@ describe('loadEnvFileIfPresent', () => {
     tempDirs.push(dir);
     const file = join(dir, '.env');
     writeFileSync(file, 'CONFIG_ENV_FILE_EXISTING_VAR=fromfile\n');
-    touched.push('CONFIG_ENV_FILE_EXISTING_VAR');
+    track('CONFIG_ENV_FILE_EXISTING_VAR');
     process.env['CONFIG_ENV_FILE_EXISTING_VAR'] = 'existing';
 
     loadEnvFileIfPresent(file);
