@@ -189,17 +189,27 @@ LOG_LEVEL=info
 
 ```ts
 const REQUIRED_MAJOR = 22;
+const REQUIRED_MINOR = 12;
 
-const major = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
+const [majorPart = '0', minorPart = '0'] = process.versions.node.split('.');
 
-if (major < REQUIRED_MAJOR) {
+const major = Number.parseInt(majorPart, 10);
+const minor = Number.parseInt(minorPart, 10);
+
+const tooOld =
+  major < REQUIRED_MAJOR ||
+  (major === REQUIRED_MAJOR && minor < REQUIRED_MINOR);
+
+if (tooOld) {
   console.error(
-    `需要 Node >= ${REQUIRED_MAJOR}，当前为 ${process.versions.node}。\n` +
-      `请执行：nvm use ${REQUIRED_MAJOR}`,
+    `需要 Node >= ${REQUIRED_MAJOR}.${REQUIRED_MINOR}，当前为 ${process.versions.node}。\n` +
+      `请执行：nvm use（不带参数，nvm 会读取仓库根目录的 .nvmrc，使用仓库指定的 Node 版本）`,
   );
   process.exit(1);
 }
 ```
+
+次版本下限 12 来自 `vitest@5.1.0` 的 engines（`^22.12.0 || ^24.0.0 || >=26.0.0`）——只比主版本会让 Node 22.0–22.11 通过守卫却死在 vitest 上。提示语用 `nvm use` 而非写死版本号，避免与仓库 `.nvmrc`（24）矛盾。
 
 - [ ] **Step 7: 验证**
 
@@ -215,7 +225,9 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typec
 export PATH="/Users/jianglu/.nvm/versions/node/v18.17.0/bin:$PATH" && node scripts/check-node.ts; echo "exit=$?"
 ```
 
-预期：打印「需要 Node >= 22，当前为 v18.17.0」，`exit=1`。
+预期：打印「需要 Node >= 22.12，当前为 18.17.0。」与「请执行：nvm use……」，`exit=1`。
+
+**验证命令必须用 `pnpm tsx` 而不是裸 `node`**：Node 18 没有原生 TS 类型剥离能力，裸 `node scripts/check-node.ts` 会先报 `ERR_UNKNOWN_FILE_EXTENSION` 而走不到守卫逻辑。`package.json` 的 `dev`/`serve` 脚本走的就是 `tsx`。
 
 - [ ] **Step 8: 提交**
 
