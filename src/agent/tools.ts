@@ -24,12 +24,23 @@ const PRIORITY: Record<ToolSource, number> = {
  * 必须同时拦 get 与 getOwnPropertyDescriptor：只拦 get 时，
  * Object.getOwnPropertyDescriptor(proxy, 'name').value 仍是旧名，
  * 展开运算符与描述符读数会和 .name 打架。
+ *
+ * 还要拦 set：写 name 会写穿到原对象（共享的 MCP/a2a 工具实例），
+ * 改名的唯一入口是这层代理。
  */
 function renameTool(original: StructuredToolInterface, name: string): StructuredToolInterface {
   return new Proxy(original, {
     get(target, property, receiver) {
       if (property === 'name') return name;
       return Reflect.get(target, property, receiver);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'name') {
+        throw new Error(
+          `禁止改写工具的 name（"${name}"）：改名只能通过代理，直接写入会写穿并污染原对象`,
+        );
+      }
+      return Reflect.set(target, property, value, receiver);
     },
     getOwnPropertyDescriptor(target, property) {
       const descriptor = Reflect.getOwnPropertyDescriptor(target, property);

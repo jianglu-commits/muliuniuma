@@ -1,20 +1,37 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
+import type { FakeChatInput, ToolSpec } from '@langchain/core/utils/testing';
+import type { BaseMessage } from '@langchain/core/messages';
+import type { ChatResult } from '@langchain/core/outputs';
+import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
 import { tool } from 'langchain';
 import { z } from 'zod';
-import type { StructuredToolInterface } from '@langchain/core/tools';
+import type { StructuredTool, StructuredToolInterface } from '@langchain/core/tools';
 import { loadConfig } from '../src/config/index.js';
 import type { AppConfig } from '../src/config/index.js';
 import { AgentRuntime, mergeToolGroups } from '../src/agent/index.js';
+import { McpHub } from '../src/mcp/index.js';
+import { LocalProcessSandbox } from '../src/sandbox/index.js';
 import type { Logger } from '../src/shared/index.js';
 
+interface SaverMockState {
+  /** strict：第二次 close 抛错；failOnce：第一次 close 抛错。 */
+  mode: 'strict' | 'failOnce';
+  /** 记录每次 close 的调用顺序，便于断言「三个资源都被尝试关闭」。 */
+  records: string[];
+}
+
+const saverMock = vi.hoisted((): SaverMockState => ({ mode: 'strict', records: [] }));
+
 /**
- * better-sqlite3 v12 的 close() 本身幂等，重复关闭不会抛；
- * 这里替换成「重复关闭即抛」的严格版本，
- * 让 dispose() 的幂等守卫成为可观测行为而不是碰巧不炸。
+ * dispose 的幂等守卫必须有可观测的失败才有判别力：
+ * 真实 better-sqlite3 的 close() 本身是幂等的，重复关闭并不会抛错。
+ * 这里用严格替身制造失败——strict 模式下第二次 close 抛错，
+ * failOnce 模式下第一次 close 抛错——让守卫与重试路径都可观测。
  */
 vi.mock('@langchain/langgraph-checkpoint-sqlite', async (importOriginal) => {
   const original =
@@ -28,7 +45,13 @@ vi.mock('@langchain/langgraph-checkpoint-sqlite', async (importOriginal) => {
       const close = db.close.bind(db);
       db.close = (): void => {
         closes += 1;
-        if (closes > 1) throw new Error('The database connection is not open');
+        saverMock.records.push('db');
+        if (saverMock.mode === 'failOnce' && closes === 1) {
+          throw new Error('模拟首次 close 失败');
+        }
+        if (saverMock.mode === 'strict' && closes > 1) {
+          throw new Error('模拟重复 close 失败');
+        }
         close();
       };
       return new StrictSqliteSaver(db);
@@ -37,6 +60,35 @@ vi.mock('@langchain/langgraph-checkpoint-sqlite', async (importOriginal) => {
 
   return { SqliteSaver: StrictSqliteSaver };
 });
+
+/**
+ * 记录模型真正收到的 messages：FakeListChatModel.bindTools 会新建一个普通实例，
+ * 绕开子类的 _generate，所以这里同时覆写 bindTools，把绑定后的模型换成自己
+ * （假模型不消费工具 schema，故不再转绑）。
+ */
+class RecordingChatModel extends FakeListChatModel {
+  constructor(
+    params: FakeChatInput,
+    private readonly recorder: BaseMessage[][],
+  ) {
+    super(params);
+  }
+
+  override async _generate(
+    messages: BaseMessage[],
+    options?: this['ParsedCallOptions'],
+    runManager?: CallbackManagerForLLMRun,
+  ): Promise<ChatResult> {
+    this.recorder.push(messages);
+    return super._generate(messages, options, runManager);
+  }
+
+  override bindTools(
+    tools: (StructuredTool | ToolSpec)[],
+  ): ReturnType<FakeListChatModel['bindTools']> {
+    return this.withConfig({});
+  }
+}
 
 interface LogCall {
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -150,6 +202,21 @@ describe('mergeToolGroups', () => {
     expect(renamed.name).toBe('dup_1');
     expect(Object.getOwnPropertyDescriptor(renamed, 'name')?.value).toBe('dup_1');
     expect({ ...renamed }.name).toBe('dup_1');
+  });
+
+  it('改名后的工具写入 name 抛错且不污染原对象', () => {
+    const original = makeTool('dup');
+    const merged = mergeToolGroups([
+      { source: 'builtin', tools: [makeTool('dup')] },
+      { source: 'mcp', tools: [original] },
+    ]);
+
+    const renamed = merged[1]!;
+    expect(() => {
+      renamed.name = 'hacked';
+    }).toThrow(/name/);
+    expect(original.name).toBe('dup');
+    expect(renamed.name).toBe('dup_1');
   });
 
   it('带 content_and_artifact 的工具改名后语义不变', async () => {
@@ -278,6 +345,8 @@ describe('AgentRuntime', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'runtime-'));
+    saverMock.mode = 'strict';
+    saverMock.records.length = 0;
   });
 
   afterEach(async () => {
@@ -372,6 +441,112 @@ describe('AgentRuntime', () => {
     await runtime.dispose();
     await runtime.dispose();
     runtime = undefined;
+  });
+
+  it('关闭失败后可重试，且三个资源都被尝试关闭', async () => {
+    saverMock.mode = 'failOnce';
+    const mcpError = new Error('mcp 关闭失败');
+    let mcpAttempts = 0;
+
+    const mcpSpy = vi
+      .spyOn(McpHub.prototype, 'close')
+      .mockImplementation(async (): Promise<void> => {
+        mcpAttempts += 1;
+        saverMock.records.push('mcp');
+        if (mcpAttempts === 1) throw mcpError;
+      });
+
+    const originalSandboxDispose = LocalProcessSandbox.prototype.dispose;
+    const sandboxSpy = vi
+      .spyOn(LocalProcessSandbox.prototype, 'dispose')
+      .mockImplementation(async function (this: LocalProcessSandbox): Promise<void> {
+        saverMock.records.push('sandbox');
+        await originalSandboxDispose.call(this);
+      });
+
+    try {
+      const created = await AgentRuntime.create(makeConfig(root!), {
+        model: new FakeListChatModel({ responses: ['模型回答'] }),
+      });
+      runtime = created;
+
+      // 第一个失败是 mcp 的异常：即使后面的 db close 也失败，抛出的仍应是它。
+      await expect(created.dispose()).rejects.toBe(mcpError);
+      expect(saverMock.records).toEqual(['mcp', 'sandbox', 'db']);
+
+      // 关闭失败后必须留下重试机会：第二次 dispose 真正再跑一遍并成功。
+      await created.dispose();
+      expect(saverMock.records).toEqual(['mcp', 'sandbox', 'db', 'mcp', 'sandbox', 'db']);
+    } finally {
+      mcpSpy.mockRestore();
+      sandboxSpy.mockRestore();
+      runtime = undefined;
+    }
+  });
+
+  it('并发 dispose 共享同一次关闭', async () => {
+    const mcpSpy = vi
+      .spyOn(McpHub.prototype, 'close')
+      .mockImplementation(async (): Promise<void> => {
+        saverMock.records.push('mcp');
+      });
+    const sandboxSpy = vi
+      .spyOn(LocalProcessSandbox.prototype, 'dispose')
+      .mockImplementation(async (): Promise<void> => {
+        saverMock.records.push('sandbox');
+      });
+
+    try {
+      const created = await AgentRuntime.create(makeConfig(root!), {
+        model: new FakeListChatModel({ responses: ['模型回答'] }),
+      });
+      runtime = created;
+
+      await Promise.all([created.dispose(), created.dispose()]);
+      expect(saverMock.records).toEqual(['mcp', 'sandbox', 'db']);
+    } finally {
+      mcpSpy.mockRestore();
+      sandboxSpy.mockRestore();
+      runtime = undefined;
+    }
+  });
+
+  it('system prompt 作为系统消息真的送进了模型', async () => {
+    await writeSkill(root!, 'demo', 'demo', '演示技能', '这是正文里的秘密');
+
+    const recorder: BaseMessage[][] = [];
+    const created = await AgentRuntime.create(makeConfig(root!), {
+      model: new RecordingChatModel({ responses: ['模型回答'] }, recorder),
+    });
+    runtime = created;
+
+    await created.run('你好', { threadId: 't1' });
+
+    const systemMessages = recorder
+      .flat()
+      .filter((message) => message.getType() === 'system');
+    expect(systemMessages).toHaveLength(1);
+    const prompt = systemMessages[0]!.text;
+    expect(prompt).toContain('demo');
+    expect(prompt).toContain('演示技能');
+    expect(prompt).not.toContain('这是正文里的秘密');
+  });
+
+  it('启动失败时回收已建的沙箱目录', async () => {
+    await writeFile(
+      join(root!, 'mcp.json'),
+      JSON.stringify({ servers: { broken: 'not-an-object' } }),
+    );
+
+    await expect(
+      AgentRuntime.create(makeConfig(root!), {
+        model: new FakeListChatModel({ responses: ['模型回答'] }),
+      }),
+    ).rejects.toThrow(/broken/);
+
+    const sandboxRoot = join(root!, 'sandbox');
+    expect(existsSync(sandboxRoot)).toBe(true);
+    expect(await readdir(sandboxRoot)).toEqual([]);
   });
 
   it('MCP 连接失败走注入的 logger', async () => {

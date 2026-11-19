@@ -30,8 +30,9 @@ export interface RunResult {
 /**
  * 取最后一个有非空文本的 AI 消息。
  *
- * 用 instanceof AIMessage 而不是 getType() === 'ai'：AIMessage.text 是类上的
- * getter，只有拿到具体类型才能直接读，且反序列化后的消息实例化类型依然成立。
+ * 用 instanceof AIMessage 只是为了识别 AI 消息：AIMessage.isInstance 校验
+ * type === 'ai'，反序列化后的消息依然成立；text 定义在 BaseMessage 上，
+ * 任何消息类型都能直接读。
  */
 export function extractFinalText(messages: BaseMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -44,8 +45,17 @@ export function extractFinalText(messages: BaseMessage[]): string {
   return '';
 }
 
+/** 清理失败不能顶替掉调用方真正关心的原始异常。 */
+async function ignoreFailure(close: () => Promise<void> | void): Promise<void> {
+  try {
+    await close();
+  } catch {
+    // 忽略
+  }
+}
+
 export class AgentRuntime {
-  private disposed = false;
+  private disposing: Promise<void> | undefined;
 
   private constructor(
     private readonly agent: ReturnType<typeof createAgent>,
@@ -73,49 +83,60 @@ export class AgentRuntime {
       maxOutputBytes: config.sandbox.maxOutputBytes,
     });
 
-    const skillRegistry = new SkillRegistry(await loadSkills(config.skillsDir));
-    const mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
-    const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath, appLogger.child('a2a'));
+    let checkpointer: SqliteSaver | undefined;
+    try {
+      const skillRegistry = new SkillRegistry(await loadSkills(config.skillsDir));
+      const mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
+      const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath, appLogger.child('a2a'));
 
-    const tools = mergeToolGroups(
-      [
-        {
-          source: 'builtin',
-          tools: [...createSandboxTools(sandbox), createLoadSkillTool(skillRegistry)],
-        },
-        { source: 'skill', tools: await skillRegistry.loadTools() },
-        { source: 'mcp', tools: await mcpHub.tools() },
-        { source: 'a2a', tools: createRemoteAgentTools(a2aHub) },
-      ],
-      appLogger.child('tools'),
-    );
+      const tools = mergeToolGroups(
+        [
+          {
+            source: 'builtin',
+            tools: [...createSandboxTools(sandbox), createLoadSkillTool(skillRegistry)],
+          },
+          { source: 'skill', tools: await skillRegistry.loadTools() },
+          { source: 'mcp', tools: await mcpHub.tools() },
+          { source: 'a2a', tools: createRemoteAgentTools(a2aHub) },
+        ],
+        appLogger.child('tools'),
+      );
 
-    await mkdir(dirname(config.checkpointDb), { recursive: true });
-    const checkpointer = SqliteSaver.fromConnString(config.checkpointDb);
+      await mkdir(dirname(config.checkpointDb), { recursive: true });
+      checkpointer = SqliteSaver.fromConnString(config.checkpointDb);
 
-    const prompt = [
-      '你是一个可扩展 Agent 运行时的执行体。',
-      skillRegistry.promptSection(),
-    ]
-      .filter((section) => section.length > 0)
-      .join('\n\n');
+      const prompt = [
+        '你是一个可扩展 Agent 运行时的执行体。',
+        skillRegistry.promptSection(),
+      ]
+        .filter((section) => section.length > 0)
+        .join('\n\n');
 
-    const agent = createAgent({
-      model,
-      tools,
-      systemPrompt: prompt,
-      checkpointer,
-    });
+      const agent = createAgent({
+        model,
+        tools,
+        systemPrompt: prompt,
+        checkpointer,
+      });
 
-    return new AgentRuntime(
-      agent,
-      sandbox,
-      skillRegistry,
-      mcpHub,
-      a2aHub,
-      checkpointer,
-      prompt,
-    );
+      return new AgentRuntime(
+        agent,
+        sandbox,
+        skillRegistry,
+        mcpHub,
+        a2aHub,
+        checkpointer,
+        prompt,
+      );
+    } catch (error) {
+      // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录。
+      await ignoreFailure(() => sandbox.dispose());
+      const created = checkpointer;
+      if (created !== undefined) {
+        await ignoreFailure(() => created.db.close());
+      }
+      throw error;
+    }
   }
 
   async run(input: string, options: { threadId: string }): Promise<RunResult> {
@@ -137,16 +158,46 @@ export class AgentRuntime {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
-    try {
-      await this.mcpHub.close();
-    } finally {
-      try {
-        await this.sandbox.dispose();
-      } finally {
-        this.checkpointer.db.close();
-      }
+    const pending = this.disposing;
+    if (pending !== undefined) {
+      await pending;
+      return;
     }
+    const attempt = this.closeResources();
+    this.disposing = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      // 关闭失败必须清掉缓存，否则后续 dispose() 永远拿不到重试机会。
+      if (this.disposing === attempt) this.disposing = undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * 三个资源都要关闭：其中一个失败不能跳过其余的；
+   * 抛出的是第一个失败而不是最后一个，否则原始故障原因会被后续异常顶替。
+   */
+  private async closeResources(): Promise<void> {
+    let failed = false;
+    let firstError: unknown;
+    const closeOne = async (close: () => Promise<void> | void): Promise<void> => {
+      try {
+        await close();
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      }
+    };
+
+    await closeOne(() => this.mcpHub.close());
+    await closeOne(() => this.sandbox.dispose());
+    await closeOne(() => {
+      this.checkpointer.db.close();
+    });
+
+    if (failed) throw firstError;
   }
 }
