@@ -3427,7 +3427,28 @@ git commit -m "fix: bound A2A peer calls with a timeout and close test fixtures 
 - Create: `src/agent/tools.ts`, `src/agent/runtime.ts`, `src/agent/index.ts`
 - Test: `tests/agent.runtime.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/agent.runtime.test.ts`**
+**状态：已完成**（commits `db9bda5..31b6642`，审查 Needs fixes → 2 修复轮后复审 Approved；基线 12 文件 / 204 测试，typecheck 与 build 均 exit 0）
+
+> **实现偏离简报之处（控制器裁决 R1–R15，下方代码为最终落地版本）**
+>
+> - **R1（Important）**：工具改名**不得用重包装**（简报用 `DynamicStructuredTool` + `func: original.invoke`）——Task 8 已实证重包装会破坏 `content_and_artifact` 语义（普通输入与 ToolCall 输入两种形态都抛 `not a two-tuple`）。改用 Proxy 改名，**且必须同时拦 `get` 与 `getOwnPropertyDescriptor`**：控制器实测外层 proxy 只拦 `get` 时，`Object.getOwnPropertyDescriptor(outer,'name').value` 返回**内层旧名**，与 `.name` / 展开 / `map(t=>t.name)` 打架。
+> - **R2（Important）**：禁止 `as` 断言（简报三处：`schema as never` / `input as never` / `result.messages as BaseMessage[]`）。控制器实测 `result.messages` **直接可赋给 `BaseMessage[]`**、`StructuredToolInterface[]` **可直接**传给 `createAgent` 的 `tools`。
+> - **R3（Important）**：用项目 logger，不 `console.warn`；`mergeToolGroups` 接受可选 logger（默认 `createLogger('info','tools')`），告警含原名与新名。
+> - **R4（Important）**：`AgentRuntime.create` 必须给 McpHub / A2AClientHub **注入 logger**（`appLogger.child('mcp'|'a2a')`），否则 `LOG_LEVEL` 永不生效。
+> - **R5（Important）**：**简报第二条测试的 `toContain('第二轮')` 必然失败**。根因（控制器实测）：`createAgent` **每次 invoke 都调 `model.bindTools()`**，而 `FakeListChatModel.bindTools` 会**新建**计数器 `i` 从 0 开始的 `FakeStreamingChatModel` → 经 `createAgent` 时假模型**永远返回 `responses[0]`**。改写为：第一次 text 精确等于 `responses[0]`；同一 `threadId` 第二次消息数增长且含第一轮人消息；换 `threadId` 回到 2。
+> - **R6（Important）**：`dispose()` 必须**幂等**且关闭全部资源（mcpHub / sandbox / checkpointer）。修复轮 1 进一步要求：缓存 in-flight promise、失败时清缓存**以允许重试**、抛**第一个**失败而非最后一个（嵌套 `finally` 会让后异常顶替原始异常）。
+> - **R7**：沙箱 id 必须**每实例唯一**（简报硬编码 `'default'`；Task 5 的 `dispose()` 会递归删除 workdir，共享 id 会互删）。
+> - **R8**：工具类型用 `StructuredToolInterface[]`。**R9**：合并规则照 spec §7（builtin > skill > mcp > a2a，后缀取当前未占用的最小值，`sort` 自 ES2019 起稳定 → 同源相对顺序不变）。**R10**：`extractFinalText` 用 `instanceof AIMessage` 识别 AI 消息。**R11**：`RunResult { text, messages }`，`messages` 直接来自 `result.messages`。**R12**：barrel 只导出 tools + runtime。**R13**：`AgentRuntimeDeps { model?: BaseChatModel }`，生产走 `createChatModel(config.model)`。**R14**：测试覆盖补强（见下方用例数）。**R15**：system prompt 拼接照简报。
+>
+> **控制器实测的 SDK 事实**：见本节「已实证的 SDK 事实」小节（写在下方代码块之前）。
+>
+> **修复轮 1**（评审判定 Needs fixes，1 Important + 5 Minor 打包修）：dispose 改 in-flight promise 缓存 + 失败清缓存 + 抛第一个失败；合并层 proxy 加 `set` 陷阱（**控制器推翻了上一轮评审的 instruction-mandated 判断**：R1 原文只禁止「用 set 陷阱实现改名」，未排除「用 set 陷阱拒绝改名」）；`extractFinalText` 注释事实纠正（`text` 在 `BaseMessage` 上，`instanceof` 只用于识别 AI 消息）；`vi.mock` 严格 saver 的口径改准（实测 `better-sqlite3@12.11.1` 的 `db.close()` 二次调用**不抛**）；新增 `RecordingChatModel` 断言 system prompt **真的到达模型**（实测 `createAgent` 把字符串 prompt 归一化成一条 `SystemMessage` 并前置到首位；`FakeListChatModel.bindTools` 会新建普通实例绕开子类 `_generate`，故须同时覆写 `bindTools`）；`create()` 失败时回收沙箱与 checkpointer 并重抛原始错误。
+>
+> **修复轮 2**（复审 Approved 后控制器再打包修 2 条）：`create()` 失败时的清理**漏掉 `mcpHub`**——`mcpHub.tools()` 会真正建连并拉起 stdio 子进程（`mcp-adapters/dist/client.js:161`），而 `mkdir` / `SqliteSaver` / `createAgent` 任一失败都会留下孤儿进程，与修复 F 同类；`ignoreFailure` 的裸 `catch` 吞掉清理错误却不留痕迹 → 加 `logger` + `label` 打 `warn`，「不抛」语义不变。
+>
+> **路由到最终整分支评审**：合并层与 Task 8 的 skill 层代理**都**缺 `defineProperty` 陷阱（`Object.defineProperty` 可绕过 `set` 陷阱写穿原对象）→ 两层统一补，避免半修。
+
+- [x] **Step 1: 写失败的测试 `tests/agent.runtime.test.ts`**
 
 ```ts
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -3532,7 +3553,17 @@ describe('AgentRuntime', () => {
 
 第二个用例验证 SQLite checkpointer 真的生效：第二次调用返回的消息里应包含第一轮的历史。
 
-- [ ] **Step 2: 运行测试确认失败**
+**已实证的 SDK 事实（控制器实跑，供后续任务复用）**
+
+- `createAgent` 参数（`langchain/dist/agents/types.d.ts:403` 起）：`model: string | AgentLanguageModelLike`、`tools?: (ServerTool | ClientTool)[]`、`systemPrompt?: string | SystemMessage`、`stateSchema?`、`contextSchema?`、`checkpointer?: BaseCheckpointSaver | boolean`、`store?`、`responseFormat?`、`middleware?`。
+- `SqliteSaver.fromConnString(path)` 实现就是 `new Database(path)`（`@langchain/langgraph-checkpoint-sqlite/dist/index.js:91-93`）→ **普通本地路径直接可用**；`db` 是**公开字段**；建库时 `pragma("journal_mode=WAL")` → 会产生 `-wal` / `-shm` 边车文件。
+- 类型可赋值性（`tsc --strict` 实测**零错误**）：`StructuredToolInterface[]` 可直接传给 `createAgent` 的 `tools`；`result.messages` 可直接赋给 `BaseMessage[]`；`FakeListChatModel` 满足 `AgentLanguageModelLike`。
+- 运行时行为（控制器实跑）：同一 `thread_id` 的第二次调用带回历史（2 → 4 条消息）；不同 `thread_id` 独立（2 条）；反序列化后 `instanceof AIMessage` 成立且 `.text` 可读。
+- ⚠️ **假模型陷阱**：`createAgent` **每次 invoke 都调 `model.bindTools()`**，而 `FakeListChatModel.bindTools` 会**新建** `FakeStreamingChatModel`（计数器 `i` 从 0 开始）→ 经 `createAgent` 时假模型**永远返回 `responses[0]`**。
+- ⚠️ **Proxy 套 Proxy**：外层 proxy 只拦 `get` 时，`Object.getOwnPropertyDescriptor(outer,'name').value` 返回**内层旧名**（外层的 gOPD 转发到内层），而 `.name` / 展开 / `map(t=>t.name)` 都是新名 → 两层代理都须拦 `getOwnPropertyDescriptor`。
+- `createAgent` 把字符串 `systemPrompt` 归一化成**一条 `SystemMessage`**（content 为 `[{type:'text',text:…}]`）并前置到模型 messages 首位。
+
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/agent.runtime.test.ts
@@ -3540,18 +3571,21 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/agent/index.js"`。
 
-- [ ] **Step 3: 实现 `src/agent/tools.ts`**
+- [x] **Step 3: 实现 `src/agent/tools.ts`**
 
 ```ts
-import { DynamicStructuredTool, type StructuredTool } from '@langchain/core/tools';
+import type { StructuredToolInterface } from '@langchain/core/tools';
+import { createLogger } from '../shared/index.js';
+import type { Logger } from '../shared/index.js';
 
 export type ToolSource = 'builtin' | 'skill' | 'mcp' | 'a2a';
 
 export interface ToolGroup {
   source: ToolSource;
-  tools: StructuredTool[];
+  tools: StructuredToolInterface[];
 }
 
+/** 数值越小优先级越高：builtin > skill > mcp > a2a。 */
 const PRIORITY: Record<ToolSource, number> = {
   builtin: 0,
   skill: 1,
@@ -3559,37 +3593,70 @@ const PRIORITY: Record<ToolSource, number> = {
   a2a: 3,
 };
 
-function renameTool(original: StructuredTool, name: string): StructuredTool {
-  return new DynamicStructuredTool({
-    name,
-    description: original.description ?? name,
-    schema: original.schema as never,
-    func: async (input) => await original.invoke(input as never),
+/**
+ * 用 Proxy 改名而非 invoke 重包装：重包装会把 content_and_artifact 的
+ * tuple 拍平成普通内容，工具语义失真。
+ *
+ * 必须同时拦 get 与 getOwnPropertyDescriptor：只拦 get 时，
+ * Object.getOwnPropertyDescriptor(proxy, 'name').value 仍是旧名，
+ * 展开运算符与描述符读数会和 .name 打架。
+ *
+ * 还要拦 set：写 name 会写穿到原对象（共享的 MCP/a2a 工具实例），
+ * 改名的唯一入口是这层代理。
+ */
+function renameTool(original: StructuredToolInterface, name: string): StructuredToolInterface {
+  return new Proxy(original, {
+    get(target, property, receiver) {
+      if (property === 'name') return name;
+      return Reflect.get(target, property, receiver);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'name') {
+        throw new Error(
+          `禁止改写工具的 name（"${name}"）：改名只能通过代理，直接写入会写穿并污染原对象`,
+        );
+      }
+      return Reflect.set(target, property, value, receiver);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (property !== 'name' || descriptor === undefined) return descriptor;
+      // 不可配置且不可写的属性必须原样上报，否则违反 Proxy 不变量。
+      if (descriptor.configurable === false && descriptor.writable === false) {
+        return descriptor;
+      }
+      return { ...descriptor, value: name };
+    },
   });
 }
 
-export function mergeToolGroups(groups: ToolGroup[]): StructuredTool[] {
+export function mergeToolGroups(
+  groups: ToolGroup[],
+  logger: Logger = createLogger('info', 'tools'),
+): StructuredToolInterface[] {
   const ordered = [...groups].sort(
     (a, b) => PRIORITY[a.source] - PRIORITY[b.source],
   );
 
   const used = new Set<string>();
-  const merged: StructuredTool[] = [];
+  const merged: StructuredToolInterface[] = [];
 
   for (const group of ordered) {
-    for (const tool of group.tools) {
-      if (!used.has(tool.name)) {
-        used.add(tool.name);
-        merged.push(tool);
+    for (const item of group.tools) {
+      if (!used.has(item.name)) {
+        used.add(item.name);
+        merged.push(item);
         continue;
       }
 
       let suffix = 1;
-      while (used.has(`${tool.name}_${suffix}`)) suffix += 1;
-      const name = `${tool.name}_${suffix}`;
+      while (used.has(`${item.name}_${suffix}`)) suffix += 1;
+      const name = `${item.name}_${suffix}`;
       used.add(name);
-      console.warn(`[tools] 工具名冲突，已重命名为 ${name}`);
-      merged.push(renameTool(tool, name));
+      logger.warn(
+        `工具名冲突：来源 "${group.source}" 的工具 "${item.name}" 已重命名为 "${name}"`,
+      );
+      merged.push(renameTool(item, name));
     }
   }
 
@@ -3597,26 +3664,28 @@ export function mergeToolGroups(groups: ToolGroup[]): StructuredTool[] {
 }
 ```
 
-- [ ] **Step 4: 实现 `src/agent/runtime.ts`**
+- [x] **Step 4: 实现 `src/agent/runtime.ts`**
 
 ```ts
+import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createAgent } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import { AIMessage } from '@langchain/core/messages';
+import type { BaseMessage } from '@langchain/core/messages';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import type { AppConfig } from '../config/index.js';
 import { createChatModel } from '../llm/index.js';
-import { createSandbox, type Sandbox } from '../sandbox/index.js';
+import { createSandbox } from '../sandbox/index.js';
+import type { Sandbox } from '../sandbox/index.js';
 import { createSandboxTools } from '../tools/index.js';
-import {
-  SkillRegistry,
-  createLoadSkillTool,
-  loadSkills,
-} from '../skills/index.js';
+import { SkillRegistry, createLoadSkillTool, loadSkills } from '../skills/index.js';
+import type { SkillManifest } from '../skills/index.js';
 import { McpHub } from '../mcp/index.js';
 import { A2AClientHub, createRemoteAgentTools } from '../a2a/index.js';
+import { createLogger } from '../shared/index.js';
+import type { Logger } from '../shared/index.js';
 import { mergeToolGroups } from './tools.js';
 
 export interface AgentRuntimeDeps {
@@ -3628,18 +3697,40 @@ export interface RunResult {
   messages: BaseMessage[];
 }
 
+/**
+ * 取最后一个有非空文本的 AI 消息。
+ *
+ * 用 instanceof AIMessage 只是为了识别 AI 消息：AIMessage.isInstance 校验
+ * type === 'ai'，反序列化后的消息依然成立；text 定义在 BaseMessage 上，
+ * 任何消息类型都能直接读。
+ */
 export function extractFinalText(messages: BaseMessage[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message instanceof AIMessage) {
       const text = message.text;
-      if (text) return text;
+      if (text.length > 0) return text;
     }
   }
   return '';
 }
 
+/** 清理失败不能顶替掉调用方真正关心的原始异常，但必须留下可观测痕迹。 */
+async function ignoreFailure(
+  close: () => Promise<void> | void,
+  logger: Logger,
+  label: string,
+): Promise<void> {
+  try {
+    await close();
+  } catch (error) {
+    logger.warn(`${label}清理失败，已忽略`, error);
+  }
+}
+
 export class AgentRuntime {
+  private disposing: Promise<void> | undefined;
+
   private constructor(
     private readonly agent: ReturnType<typeof createAgent>,
     private readonly sandbox: Sandbox,
@@ -3647,60 +3738,83 @@ export class AgentRuntime {
     private readonly mcpHub: McpHub,
     private readonly a2aHub: A2AClientHub,
     private readonly checkpointer: SqliteSaver,
+    private readonly prompt: string,
   ) {}
 
   static async create(
     config: AppConfig,
     deps: AgentRuntimeDeps = {},
   ): Promise<AgentRuntime> {
+    const appLogger = createLogger(config.logLevel, 'app');
     const model = deps.model ?? (await createChatModel(config.model));
 
+    // 沙箱 id 必须每实例唯一：dispose() 会递归删除 workdir，
+    // 共享 id 会让一个 runtime 删掉另一个正在使用的目录。
     const sandbox = await createSandbox('local', {
-      id: 'default',
+      id: `default-${randomUUID()}`,
       root: config.sandbox.root,
       timeoutMs: config.sandbox.timeoutMs,
       maxOutputBytes: config.sandbox.maxOutputBytes,
     });
 
-    const skillRegistry = new SkillRegistry(await loadSkills(config.skillsDir));
-    const mcpHub = await McpHub.fromConfig(config.mcpConfigPath);
-    const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath);
+    let checkpointer: SqliteSaver | undefined;
+    let mcpHub: McpHub | undefined;
+    try {
+      const skillRegistry = new SkillRegistry(await loadSkills(config.skillsDir));
+      mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
+      const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath, appLogger.child('a2a'));
 
-    const tools = mergeToolGroups([
-      {
-        source: 'builtin',
-        tools: [...createSandboxTools(sandbox), createLoadSkillTool(skillRegistry)],
-      },
-      { source: 'skill', tools: await skillRegistry.loadTools() },
-      { source: 'mcp', tools: await mcpHub.tools() },
-      { source: 'a2a', tools: createRemoteAgentTools(a2aHub) },
-    ]);
+      const tools = mergeToolGroups(
+        [
+          {
+            source: 'builtin',
+            tools: [...createSandboxTools(sandbox), createLoadSkillTool(skillRegistry)],
+          },
+          { source: 'skill', tools: await skillRegistry.loadTools() },
+          { source: 'mcp', tools: await mcpHub.tools() },
+          { source: 'a2a', tools: createRemoteAgentTools(a2aHub) },
+        ],
+        appLogger.child('tools'),
+      );
 
-    await mkdir(dirname(config.checkpointDb), { recursive: true });
-    const checkpointer = SqliteSaver.fromConnString(config.checkpointDb);
+      await mkdir(dirname(config.checkpointDb), { recursive: true });
+      checkpointer = SqliteSaver.fromConnString(config.checkpointDb);
 
-    const systemPrompt = [
-      '你是一个可扩展 Agent 运行时的执行体。',
-      skillRegistry.promptSection(),
-    ]
-      .filter((section) => section.length > 0)
-      .join('\n\n');
+      const prompt = [
+        '你是一个可扩展 Agent 运行时的执行体。',
+        skillRegistry.promptSection(),
+      ]
+        .filter((section) => section.length > 0)
+        .join('\n\n');
 
-    const agent = createAgent({
-      model,
-      tools,
-      systemPrompt,
-      checkpointer,
-    });
+      const agent = createAgent({
+        model,
+        tools,
+        systemPrompt: prompt,
+        checkpointer,
+      });
 
-    return new AgentRuntime(
-      agent,
-      sandbox,
-      skillRegistry,
-      mcpHub,
-      a2aHub,
-      checkpointer,
-    );
+      return new AgentRuntime(
+        agent,
+        sandbox,
+        skillRegistry,
+        mcpHub,
+        a2aHub,
+        checkpointer,
+        prompt,
+      );
+    } catch (error) {
+      // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录，
+      // MCP 建连拉起的 stdio 子进程也会变成孤儿进程。
+      const cleanupLogger = appLogger.child('agent');
+      await ignoreFailure(() => mcpHub?.close(), cleanupLogger, 'MCP 连接');
+      await ignoreFailure(() => sandbox.dispose(), cleanupLogger, '沙箱');
+      const created = checkpointer;
+      if (created !== undefined) {
+        await ignoreFailure(() => created.db.close(), cleanupLogger, '检查点数据库');
+      }
+      throw error;
+    }
   }
 
   async run(input: string, options: { threadId: string }): Promise<RunResult> {
@@ -3709,43 +3823,95 @@ export class AgentRuntime {
       { configurable: { thread_id: options.threadId } },
     );
 
-    const messages = result.messages as BaseMessage[];
+    const messages: BaseMessage[] = result.messages;
     return { text: extractFinalText(messages), messages };
   }
 
-  listSkills() {
+  listSkills(): SkillManifest[] {
     return this.skillRegistry.list();
   }
 
+  systemPrompt(): string {
+    return this.prompt;
+  }
+
   async dispose(): Promise<void> {
-    await this.mcpHub.close();
-    await this.sandbox.dispose();
-    this.checkpointer.db.close();
+    const pending = this.disposing;
+    if (pending !== undefined) {
+      await pending;
+      return;
+    }
+    const attempt = this.closeResources();
+    this.disposing = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      // 关闭失败必须清掉缓存，否则后续 dispose() 永远拿不到重试机会。
+      if (this.disposing === attempt) this.disposing = undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * 三个资源都要关闭：其中一个失败不能跳过其余的；
+   * 抛出的是第一个失败而不是最后一个，否则原始故障原因会被后续异常顶替。
+   */
+  private async closeResources(): Promise<void> {
+    let failed = false;
+    let firstError: unknown;
+    const closeOne = async (close: () => Promise<void> | void): Promise<void> => {
+      try {
+        await close();
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      }
+    };
+
+    await closeOne(() => this.mcpHub.close());
+    await closeOne(() => this.sandbox.dispose());
+    await closeOne(() => {
+      this.checkpointer.db.close();
+    });
+
+    if (failed) throw firstError;
   }
 }
 ```
 
-- [ ] **Step 5: 实现 `src/agent/index.ts`**
+- [x] **Step 5: 实现 `src/agent/index.ts`**
 
 ```ts
 export * from './tools.js';
 export * from './runtime.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/agent.runtime.test.ts
 ```
 
-预期：PASS，4 个用例。
+预期：PASS，**25 个用例**（简报 4 + R14 要求的 18 + 修复轮 1 的 2 + 修复轮 2 的 1，合并层另有一组独立断言）。全量套件 **12 文件 / 204 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0。
 
-若 `createAgent` 不接受 `systemPrompt` 或 `checkpointer` 字段（类型报错），查 `langchain/dist/agents/types.d.ts:403` 的 `CreateAgentParams` 实际字段名后修正；`checkpointer` 字段已核实存在。
+简报里「若 `createAgent` 不接受 `systemPrompt` 或 `checkpointer` 字段（类型报错）」的备注**已作废**——控制器已核实两者都存在（`langchain/dist/agents/types.d.ts:403` 起：`model` / `tools?` / `systemPrompt?: string | SystemMessage` / `stateSchema?` / `checkpointer?: BaseCheckpointSaver | boolean` / `responseFormat?` / `middleware?`）。
 
-- [ ] **Step 7: 类型检查并提交**
+- [x] **Step 7: 类型检查并提交**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typecheck && git add src/agent tests/agent.runtime.test.ts && git commit -m "feat: add agent runtime with sqlite checkpointing"
+```
+
+两轮修复各起一次提交（不 amend）：
+
+```bash
+git add src/agent tests/agent.runtime.test.ts
+git commit -m "fix: allow retrying agent runtime disposal and reclaim startup resources"
+
+git add src/agent tests/agent.runtime.test.ts
+git commit -m "fix: reclaim MCP connections and log cleanup failures on startup errors"
 ```
 
 ---
