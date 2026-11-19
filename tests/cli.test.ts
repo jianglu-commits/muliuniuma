@@ -14,6 +14,28 @@ import { buildTextMessage } from '../src/a2a/index.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+// 反应列表不可观测：在子进程里 spy Promise.prototype.then，按接收者统计 closedSignal 形态的挂载次数。
+// tsx 会把 () => undefined 转译成 () => void 0，两种形态都认。
+const THEN_PROBE = `data:text/javascript,${encodeURIComponent(String.raw`
+import { writeSync } from 'node:fs';
+const originalThen = Promise.prototype.then;
+const counts = new Map();
+Promise.prototype.then = function (onFulfilled, onRejected) {
+  if (typeof onFulfilled === 'function' && onRejected == null) {
+    const shape = String(onFulfilled).replace(/\s+/g, '');
+    if (shape === '()=>void0' || shape === '()=>undefined') {
+      counts.set(this, (counts.get(this) ?? 0) + 1);
+    }
+  }
+  return originalThen.call(this, onFulfilled, onRejected);
+};
+process.on('exit', () => {
+  let max = 0;
+  for (const count of counts.values()) max = Math.max(max, count);
+  writeSync(2, '[then-probe] max=' + max + '\n');
+});
+`)}`;
+
 let child: ChildProcess | undefined;
 let tempDir: string | undefined;
 let slowLlm: Server | undefined;
@@ -79,12 +101,16 @@ function baseEnv(dir: string, port: number): Record<string, string> {
   };
 }
 
-function spawnEntrypoint(entry: string, env: Record<string, string>): ChildProcess {
-  const current = spawn(process.execPath, ['--import', 'tsx', join(REPO_ROOT, entry)], {
-    cwd: REPO_ROOT,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+function spawnEntrypoint(entry: string, env: Record<string, string>, imports: string[] = []): ChildProcess {
+  const current = spawn(
+    process.execPath,
+    ['--import', 'tsx', ...imports.flatMap((specifier) => ['--import', specifier]), join(REPO_ROOT, entry)],
+    {
+      cwd: REPO_ROOT,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
   child = current;
   return current;
 }
@@ -187,6 +213,30 @@ describe('CLI 入口冒烟', () => {
     expect(code).toBe(0);
     await expectDisposed(tempDir);
   });
+
+  it('REPL 多轮输入时 closedSignal 只挂载一个反应回调', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cli-reactions-'));
+    const port = await reservePort();
+    const current = spawnEntrypoint('src/cli.ts', baseEnv(tempDir, port), [THEN_PROBE]);
+    const stderr = capture(current.stderr);
+    const stdout = capture(current.stdout);
+    await waitFor(() => stderr().includes('会话已启动'));
+    const promptCount = (): number => stdout().split('> ').length - 1;
+    const rounds = 5;
+    for (let i = 0; i < rounds; i++) {
+      current.stdin?.write('\n');
+      await waitFor(() => promptCount() >= i + 2);
+    }
+    const exited = exitOf(current);
+    current.stdin?.write('/exit\n');
+    const { code, signal } = await exited;
+    expect(signal).toBeNull();
+    expect(code).toBe(0);
+    await expectDisposed(tempDir);
+    const marker = /\[then-probe\] max=(\d+)/.exec(stderr());
+    expect(marker).not.toBeNull();
+    expect(Number(marker?.[1])).toBe(1);
+  });
 });
 
 describe('serve 入口冒烟', () => {
@@ -214,6 +264,29 @@ describe('serve 入口冒烟', () => {
     expect(signal).toBeNull();
     expect(code).toBe(0);
     await expectDisposed(tempDir);
+  });
+
+  it('端口被占用时以非零码退出且 stderr 给出可读原因而非裸堆栈', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'serve-busy-'));
+    const port = await reservePort();
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(port, resolve));
+    try {
+      const current = spawnEntrypoint('src/serve.ts', baseEnv(tempDir, port));
+      const stderr = capture(current.stderr);
+      const { code, signal } = await exitOf(current);
+      expect(signal).toBeNull();
+      expect(code).toBe(1);
+      const output = stderr();
+      expect(output).toContain('[error] serve:');
+      expect(output).toContain('EADDRINUSE');
+      expect(output).toContain(String(port));
+      expect(output).not.toContain("Unhandled 'error' event");
+      expect(output).not.toContain('HTTP server 关闭失败');
+      await expectDisposed(tempDir);
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 
   it('取消 A2A 任务时中止信号传播到底层模型调用', async () => {

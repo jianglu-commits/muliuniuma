@@ -41,6 +41,8 @@ async function main(): Promise<void> {
       resolve();
     });
   });
+  // closedSignal 整个会话保持 pending，循环内反复 .then 会无界累积反应回调，只挂一次。
+  const closedAnswer = closedSignal.then(() => undefined);
 
   logger.info(`会话已启动（thread=${threadId}），输入 /exit 退出。`);
 
@@ -48,7 +50,7 @@ async function main(): Promise<void> {
     for (;;) {
       const answered = await Promise.race([
         rl.question('> ').catch(() => undefined),
-        closedSignal.then(() => undefined),
+        closedAnswer,
       ]);
       if (closed || answered === undefined) break;
       const line = answered.trim();

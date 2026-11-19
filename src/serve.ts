@@ -31,18 +31,21 @@ async function main(): Promise<void> {
   });
 
   let shuttingDown = false;
-  const shutdown = async (): Promise<void> => {
+  const shutdown = async (code = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    let exitCode = 0;
-    try {
-      // closeAsync 在 Node v24.19.0 上不存在，用回调包成 promise 以等待连接排空。
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-    } catch (error) {
-      logger.error('HTTP server 关闭失败', error);
-      exitCode = 1;
+    let exitCode = code;
+    // listen 失败时 server 从未运行，close 必报 ERR_SERVER_NOT_RUNNING，跳过以免掩盖真实启动错误。
+    if (server.listening) {
+      try {
+        // closeAsync 在 Node v24.19.0 上不存在，用回调包成 promise 以等待连接排空。
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      } catch (error) {
+        logger.error('HTTP server 关闭失败', error);
+        exitCode = 1;
+      }
     }
     try {
       await runtime.dispose();
@@ -52,6 +55,11 @@ async function main(): Promise<void> {
     }
     process.exit(exitCode);
   };
+
+  server.on('error', (error) => {
+    logger.error(`A2A server 启动失败（端口 ${config.a2a.port}）: ${error.message}`);
+    void shutdown(1);
+  });
 
   process.on('SIGINT', () => {
     void shutdown();
