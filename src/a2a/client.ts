@@ -20,6 +20,16 @@ export interface Peer {
 
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
+/** 远端 agent 要跑一次 LLM 回合，比启动期的卡片下载宽，但仍必须是有界的。 */
+export const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+
+export interface A2AClientHubOptions {
+  /** agent card 下载超时（启动路径）。 */
+  connectTimeoutMs?: number;
+  /** 单次远端调用超时（调用路径）。 */
+  callTimeoutMs?: number;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -110,15 +120,18 @@ function createClientFactory(connectTimeoutMs: number): ClientFactory {
 }
 
 export class A2AClientHub {
-  private constructor(private readonly peers: Peer[]) {}
+  private constructor(
+    private readonly peers: Peer[],
+    private readonly callTimeoutMs: number,
+  ) {}
 
   static async fromConfig(
     file: string,
     logger: Logger = createLogger('info', 'a2a'),
-    connectTimeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS,
+    options: A2AClientHubOptions = {},
   ): Promise<A2AClientHub> {
     const specs = await loadPeerSpecs(file);
-    const factory = createClientFactory(connectTimeoutMs);
+    const factory = createClientFactory(options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
     const peers: Peer[] = [];
 
     for (const spec of specs) {
@@ -134,7 +147,7 @@ export class A2AClientHub {
       }
     }
 
-    return new A2AClientHub(peers);
+    return new A2AClientHub(peers, options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS);
   }
 
   list(): Peer[] {
@@ -147,15 +160,28 @@ export class A2AClientHub {
       throw new A2APeerError(name, '未在 peers 配置中找到该 peer');
     }
 
+    // 远端 agent 可能接受连接后永不回包，没有中止信号的话工具调用会无限期挂住。
+    const signal = AbortSignal.timeout(this.callTimeoutMs);
+
     try {
-      const result = await peer.client.sendMessage({
-        tenant: '',
-        message: buildTextMessage({ text, role: Role.ROLE_USER }),
-        configuration: undefined,
-        metadata: undefined,
-      });
+      const result = await peer.client.sendMessage(
+        {
+          tenant: '',
+          message: buildTextMessage({ text, role: Role.ROLE_USER }),
+          configuration: undefined,
+          metadata: undefined,
+        },
+        { signal },
+      );
       return extractResultText(result);
     } catch (error) {
+      if (signal.aborted) {
+        throw new A2APeerError(
+          name,
+          `调用超时：超过 ${this.callTimeoutMs} ms 未收到远端响应`,
+          { cause: error },
+        );
+      }
       throw new A2APeerError(name, errorMessage(error), { cause: error });
     }
   }

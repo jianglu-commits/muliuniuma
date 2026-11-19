@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { A2AClientHub, createRemoteAgentTools } from '../src/a2a/index.js';
+import { A2AClientHub, DEFAULT_CALL_TIMEOUT_MS, createRemoteAgentTools } from '../src/a2a/index.js';
 import { A2APeerError, ConfigError } from '../src/shared/index.js';
 import type { Logger } from '../src/shared/index.js';
 import { startA2APeerServer, startHangingServer } from './fixtures/a2a-peer-server.mjs';
@@ -10,14 +10,22 @@ import type { A2APeerServer } from './fixtures/a2a-peer-server.mjs';
 
 let dir: string;
 let peer: A2APeerServer | undefined;
+let hanging: A2APeerServer | undefined;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'a2a-peer-'));
 });
 
-afterEach(async () => {
+/** afterEach 依赖它无条件关闭两个夹具，重复调用也必须安全。 */
+async function closeFixtures(): Promise<void> {
   await peer?.close();
   peer = undefined;
+  await hanging?.close();
+  hanging = undefined;
+}
+
+afterEach(async () => {
+  await closeFixtures();
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -114,18 +122,46 @@ describe('A2AClientHub', () => {
   });
 
   it('peer 挂住时按超时跳过而不是拖住启动', async () => {
-    const hanging = await startHangingServer();
+    const server = await startHangingServer();
+    hanging = server;
     const file = await writePeersFile({
-      peers: [{ name: 'slow-peer', url: hanging.baseUrl }],
+      peers: [{ name: 'slow-peer', url: server.baseUrl }],
     });
 
     const startedAt = Date.now();
-    const hub = await A2AClientHub.fromConfig(file, undefined, 200);
+    const hub = await A2AClientHub.fromConfig(file, undefined, { connectTimeoutMs: 200 });
     const elapsed = Date.now() - startedAt;
 
     expect(hub.list()).toEqual([]);
     expect(elapsed).toBeLessThan(5_000);
-    await hanging.close();
+  });
+
+  it('远端挂住时工具调用在超时内被中止', async () => {
+    const server = await startA2APeerServer({ replyText: 'never', hangOnCall: true });
+    peer = server;
+    const file = await writePeersFile({
+      peers: [{ name: 'stuck-peer', url: server.baseUrl }],
+    });
+    const hub = await A2AClientHub.fromConfig(file, undefined, { callTimeoutMs: 300 });
+    const tools = createRemoteAgentTools(hub);
+    const askTool = tools[0];
+    expect(askTool).toBeDefined();
+
+    const startedAt = Date.now();
+    const error: unknown = await askTool!
+      .invoke({ message: '在吗' })
+      .catch((caught: unknown) => caught);
+    const elapsed = Date.now() - startedAt;
+
+    expect(error).toBeInstanceOf(A2APeerError);
+    expect((error as A2APeerError).message).toContain('超时');
+    expect((error as A2APeerError).message).toContain('stuck-peer');
+    expect((error as A2APeerError).message).toContain('300');
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  it('调用超时默认有界（120 秒）而不是无限等待', () => {
+    expect(DEFAULT_CALL_TIMEOUT_MS).toBe(120_000);
   });
 
   it('peers 配置 JSON 畸形时报 ConfigError', async () => {
@@ -216,5 +252,26 @@ describe('createRemoteAgentTools', () => {
     expect(() => createRemoteAgentTools(hub)).toThrow(ConfigError);
     expect(() => createRemoteAgentTools(hub)).toThrow(/a b/);
     expect(() => createRemoteAgentTools(hub)).toThrow(/a_b/);
+  });
+});
+
+describe('测试夹具生命周期', () => {
+  it('afterEach 使用的清理逻辑会关闭挂起的服务器', async () => {
+    const server = await startHangingServer();
+    hanging = server;
+
+    await closeFixtures();
+
+    expect(server.isClosed()).toBe(true);
+    expect(hanging).toBeUndefined();
+  });
+
+  it('夹具的 close() 可以重复调用而不抛错', async () => {
+    const server = await startA2APeerServer({ replyText: 'ok' });
+
+    await server.close();
+    await expect(server.close()).resolves.toBeUndefined();
+    await expect(server.close()).resolves.toBeUndefined();
+    expect(server.isClosed()).toBe(true);
   });
 });

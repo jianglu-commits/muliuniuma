@@ -4,18 +4,24 @@ const AGENT_CARD_PATH = '/.well-known/agent-card.json';
 
 function createTrackedServer(handler) {
   const sockets = new Set();
+  let closed = false;
   const server = createServer(handler);
   server.on('connection', (socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
   });
-  const close = () =>
-    new Promise((resolve, reject) => {
+  // close() 必须幂等：afterEach 与用例体都可能关同一个服务器，重复关闭不应抛错。
+  const close = () => {
+    if (closed) return Promise.resolve();
+    closed = true;
+    return new Promise((resolve, reject) => {
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       server.close((error) => (error ? reject(error) : resolve()));
     });
-  return { server, close };
+  };
+  const isClosed = () => closed;
+  return { server, close, isClosed };
 }
 
 function parseJson(body) {
@@ -34,6 +40,7 @@ function parseJson(body) {
 export async function startA2APeerServer(options = {}) {
   const replyText = options.replyText ?? 'pong-from-peer';
   const peerName = options.peerName ?? 'probe-peer';
+  const hangOnCall = options.hangOnCall === true;
   const requests = [];
   let baseUrl = '';
 
@@ -72,6 +79,9 @@ export async function startA2APeerServer(options = {}) {
         return;
       }
 
+      // hangOnCall：卡片照常返回，但调用请求永不回包，用来复现「调用路径挂住」。
+      if (hangOnCall) return;
+
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -93,21 +103,21 @@ export async function startA2APeerServer(options = {}) {
     });
   };
 
-  const { server, close } = createTrackedServer(handler);
+  const { server, close, isClosed } = createTrackedServer(handler);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   baseUrl = `http://127.0.0.1:${port}`;
 
-  return { baseUrl, port, requests, close };
+  return { baseUrl, port, requests, close, isClosed };
 }
 
 /** 接受连接但永不响应，用来复现「peer 挂住」的启动路径阻塞。 */
 export async function startHangingServer() {
-  const { server, close } = createTrackedServer(() => {});
+  const { server, close, isClosed } = createTrackedServer(() => {});
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
 
-  return { baseUrl: `http://127.0.0.1:${port}`, port, requests: [], close };
+  return { baseUrl: `http://127.0.0.1:${port}`, port, requests: [], close, isClosed };
 }
