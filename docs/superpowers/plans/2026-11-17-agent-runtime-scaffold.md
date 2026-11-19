@@ -2775,10 +2775,48 @@ git commit -m "fix: make MCP hub close retryable and clarify error reporting"
 ## Task 10: A2A 消息与卡片构造
 
 **Files:**
-- Create: `src/a2a/messages.ts`, `src/a2a/card.ts`
+- Create: `src/a2a/messages.ts`, `src/a2a/card.ts`, `src/a2a/index.ts`
 - Test: `tests/a2a.messages.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/a2a.messages.test.ts`**
+**状态：已完成**（commits `6d5d9f1..ed346d8`，审查 Approved + 1 修复轮后复审 Approved；基线 10 文件 / 159 测试，typecheck 与 build 均 exit 0）
+
+> **实现偏离简报之处（控制器裁决 R1–R13，下方代码为最终落地版本）**
+>
+> 简报的类型构造与 `@a2a-js/sdk@1.3.0` 的真实类型有三处不符，控制器用 `tsc` 探针实测确认：
+>
+> - **R1**：`Part` 的 `metadata` / `filename` / `mediaType` 是**必填**（探针实测 **TS2739**）→ 填全，`mediaType` 用 `'text/plain'` 与卡片默认模式一致。
+> - **R2**：`AgentCard` 的 `signatures` 是**必填**（探针实测 **TS2741**）→ 补 `signatures: []`（本地 agent 未启用 JWS 签名，spec 首版未要求）。
+> - **R3**：`Task.status` 是 `TaskStatus | undefined`、`TaskStatus.message` 是 `Message | undefined`（探针实测 **TS18048**）→ 必须用 `task.status?.message`。
+> - **R4**：`protocolVersion` 用 SDK 常量 `A2A_PROTOCOL_VERSION`，不硬编码 `'1.0'`。
+> - **R5**：**不要硬编码假的 provider**（简报硬编码 `https://github.com/` 会真实发布到 `/.well-known/agent-card.json`）→ `CardInput.provider` 可选且默认省略；`version` 可选默认 `'0.1.0'`。
+> - **R6**：`extractResultText` / `extractText` 的入参来自**网络**（Task 11 的 client 拉远端结果），是外部数据边界 → 全程可选链 + 空数组兜底，**不**引 zod。
+> - **R7**：`isMessage` 用 `'messageId' in result`（`Message` 有 `messageId`、`Task` 用 `id`）→ 用 TS 的 `in` 收窄，**不需要** `as` 断言。
+> - **R8**：回退顺序 —— 先 `status.message` 的文本，再 artifacts 的文本（artifact 间 `'\n'` 连接后 trim）；都没有 → `''`。
+> - **R9**：`messageId` 用 `randomUUID()`；`contextId`/`taskId` 缺省 `''`；`role` 可选默认 `Role.ROLE_AGENT`，**用户消息必须能传 `Role.ROLE_USER`**。
+> - **R10**：spec §5 的 `src/a2a/` 清单漏了 `messages.ts`，但 spec §6.5 明确要求自写 `buildTextMessage()` → 裁定 `messages.ts` 是合理拆分，**spec §5 已更新**。
+> - **R11**：简报只测了 `extractResultText` 的 Message 分支，**Task 分支零覆盖**（含 `task.status` 可空陷阱），`buildAgentCard` 也没验证必填字段齐全 → 补齐；且测试数据必须**显式标注类型**（`const task: Task = {...}`），控制器探针证明不标注则字段缺失不会被 tsc 抓到。
+> - **R12**：`src/a2a/index.ts` 本任务只导出 messages + card（Task 11 再补 client / remote-tool，Task 13 再补 executor / server）。
+> - **R13**：四个公开函数都要显式返回类型。
+>
+> **修复轮 1**（评审 8 条 Minor 中裁定打包修 5 条）：
+> - **A**：`trim` 行为零覆盖 → 新增「artifacts 拼接结果去掉首尾空白」用例（输入带首尾空白）。
+> - **B**：`isMessage` 只看 `messageId`，混合载荷会被误判成 Message 并**静默返回空串** → 改为 `'messageId' in result && !('artifacts' in result)`（`Task` 必有 `artifacts`）。
+> - **C**：`status.message` 路径不 trim 而 artifacts 路径 trim，导致**纯空白的 status 文本会压掉 artifacts 回退** → status 文本先 trim、为空则落到 artifacts、返回 trim 后的值。
+> - **D**：源码扫描断言加固（正则放宽为 `/protocolVersion\s*:\s*['"]/`、先剥注释再匹配、加一行说明理由 + 自测行）。**保留该断言，不改成 mock**——`A2A_PROTOCOL_VERSION` 的当前值恰为 `'1.0'`，纯值断言今天无法区分常量与硬编码字面量。
+> - **E**：删除多余的 `withUndefinedArtifacts` helper，改用 `makeTask({ artifacts: undefined })`；`withUndefinedParts` **保留**（`Message` 没有 overrides 形参，显式 `parts: undefined` 是类型错误）。
+>
+> **已实证的 SDK 事实（后续任务直接复用，勿再猜测）**：`ROLE_USER=1` / `ROLE_AGENT=2`；`A2A_PROTOCOL_VERSION='1.0'`；`AGENT_CARD_PATH='.well-known/agent-card.json'`；`SendMessageResult = Message | Task`（包根以 type 导出）；`Message` 有 `messageId`、`Task` 用 `id` 且**必有 `artifacts`**；`Task.status` / `TaskStatus.message` 均可空；`AgentCard.signatures` 必填；`AgentInterface.protocolBinding` 是开放字符串；可选链 + `$case` 判别式的收窄能过类型检查。
+>
+> **路由到后续任务**：
+> - Task 11 的 client 发消息时**必须显式传 `role: Role.ROLE_USER` 与非空 `contextId`**（默认值在调用点不可见，忘传会静默丢失会话上下文）。
+> - Task 13 的 executor 发出消息时 contextId 必须非空（spec §7：`thread_id` = CLI 会话 id 或 A2A 的 contextId）。
+> - Task 14 的示例 skill 若含非纯文本能力，需扩展 `CardSkillInput`（当前硬编码 `text/plain`）。
+>
+> **deferred 的 Minor**（最终整分支评审再定）：`isMessage` 依赖 artifacts 键**存在**（键整体缺失时仍是理论残余，SDK 路径不可能出现）；源码扫描断言的行注释剥离会误伤字符串字面量里的 `//`（当前 `card.ts` 全文无 `//`，程序化验证 `strip(card) === card`）；护栏只覆盖 `card.ts` 一个文件；修复 C 改变了 status 文本的空白语义（远端缩进代码块的首尾空白会被抹掉）。
+
+- [x] **Step 1: 写失败的测试 `tests/a2a.messages.test.ts`**
+
+下方为简报原始的 4 个用例（全部保留、断言未删改）。最终落地 **33 个用例** = 简报 4 + R11 要求的 26 + 修复轮 3。
 
 ```ts
 import { Role } from '@a2a-js/sdk';
@@ -2833,7 +2871,7 @@ describe('buildAgentCard', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.messages.test.ts
@@ -2841,62 +2879,76 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/a2a/index.js"`。
 
-- [ ] **Step 3: 实现 `src/a2a/messages.ts`**
+- [x] **Step 3: 实现 `src/a2a/messages.ts`**（最终落地版本，含修复轮 1）
 
 ```ts
 import { randomUUID } from 'node:crypto';
-import { Role, type Message, type SendMessageResult, type Task } from '@a2a-js/sdk';
+import { Role } from '@a2a-js/sdk';
+import type { Message, Part, SendMessageResult } from '@a2a-js/sdk';
 
-export function buildTextMessage(params: {
+export interface TextMessageParams {
   text: string;
   contextId?: string;
   taskId?: string;
   role?: Role;
-}): Message {
+}
+
+export function buildTextMessage(params: TextMessageParams): Message {
+  const part: Part = {
+    content: { $case: 'text', value: params.text },
+    metadata: undefined,
+    filename: '',
+    mediaType: 'text/plain',
+  };
+
   return {
     messageId: randomUUID(),
     contextId: params.contextId ?? '',
     taskId: params.taskId ?? '',
     role: params.role ?? Role.ROLE_AGENT,
-    parts: [{ content: { $case: 'text', value: params.text } }],
+    parts: [part],
     metadata: undefined,
     extensions: [],
     referenceTaskIds: [],
   };
 }
 
+function partText(part: Part): string {
+  return part.content?.$case === 'text' ? part.content.value : '';
+}
+
 export function extractText(message: Message): string {
-  return message.parts
-    .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
-    .join('');
+  return (message.parts ?? []).map(partText).join('');
 }
 
 function isMessage(result: SendMessageResult): result is Message {
-  return 'messageId' in result;
+  return 'messageId' in result && !('artifacts' in result);
 }
 
 export function extractResultText(result: SendMessageResult): string {
-  if (isMessage(result)) return extractText(result);
+  if (isMessage(result)) {
+    return extractText(result);
+  }
 
-  const task = result as Task;
-  const statusText = task.status.message ? extractText(task.status.message) : '';
-  if (statusText) return statusText;
+  const statusText = result.status?.message
+    ? extractText(result.status.message).trim()
+    : '';
+  if (statusText) {
+    return statusText;
+  }
 
-  return task.artifacts
-    .map((artifact) =>
-      artifact.parts
-        .map((part) => (part.content?.$case === 'text' ? part.content.value : ''))
-        .join(''),
-    )
+  return (result.artifacts ?? [])
+    .map((artifact) => (artifact.parts ?? []).map(partText).join(''))
     .join('\n')
     .trim();
 }
 ```
 
-- [ ] **Step 4: 实现 `src/a2a/card.ts`**
+- [x] **Step 4: 实现 `src/a2a/card.ts`**（最终落地版本）
 
 ```ts
-import type { AgentCard } from '@a2a-js/sdk';
+import { A2A_PROTOCOL_VERSION } from '@a2a-js/sdk';
+import type { AgentCard, AgentProvider, AgentSkill } from '@a2a-js/sdk';
 
 export interface CardSkillInput {
   id: string;
@@ -2909,23 +2961,36 @@ export interface CardInput {
   description: string;
   publicUrl: string;
   skills: CardSkillInput[];
+  provider?: AgentProvider;
+  version?: string;
 }
 
+const DEFAULT_INPUT_MODES = ['text/plain'];
+const DEFAULT_OUTPUT_MODES = ['text/plain'];
+
 export function buildAgentCard(input: CardInput): AgentCard {
+  const skills: AgentSkill[] = input.skills.map((skill) => ({
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    tags: [],
+    examples: [],
+    inputModes: [...DEFAULT_INPUT_MODES],
+    outputModes: [...DEFAULT_OUTPUT_MODES],
+    securityRequirements: [],
+  }));
+
   return {
     name: input.name,
     description: input.description,
-    version: '0.1.0',
-    provider: {
-      url: 'https://github.com/',
-      organization: 'muliuniuma',
-    },
+    version: input.version ?? '0.1.0',
+    provider: input.provider,
     supportedInterfaces: [
       {
         url: input.publicUrl,
         protocolBinding: 'JSONRPC',
         tenant: '',
-        protocolVersion: '1.0',
+        protocolVersion: A2A_PROTOCOL_VERSION,
       },
     ],
     capabilities: {
@@ -2936,42 +3001,43 @@ export function buildAgentCard(input: CardInput): AgentCard {
     },
     securitySchemes: {},
     securityRequirements: [],
-    defaultInputModes: ['text/plain'],
-    defaultOutputModes: ['text/plain'],
-    skills: input.skills.map((skill) => ({
-      id: skill.id,
-      name: skill.name,
-      description: skill.description,
-      tags: [],
-      examples: [],
-      inputModes: ['text/plain'],
-      outputModes: ['text/plain'],
-      securityRequirements: [],
-    })),
+    defaultInputModes: [...DEFAULT_INPUT_MODES],
+    defaultOutputModes: [...DEFAULT_OUTPUT_MODES],
+    skills,
+    signatures: [],
   };
 }
 ```
 
-- [ ] **Step 5: 实现 `src/a2a/index.ts`（本任务先只导出这两个模块，Task 11 再补）**
+> 模式常量用**展开复制**而非直接复用，使 `skills[].inputModes` 不与 `defaultInputModes` 共享同一数组实例（避免下游改一个污染另一个）。
+
+- [x] **Step 5: 实现 `src/a2a/index.ts`（本任务先只导出这两个模块，Task 11 再补）**
 
 ```ts
 export * from './messages.js';
 export * from './card.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.messages.test.ts
 ```
 
-预期：PASS，4 个用例。
+预期：PASS，**33 个用例**（简报 4 + R11 要求的 26 + 修复轮 3）。全量套件 **10 文件 / 159 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/a2a tests/a2a.messages.test.ts
 git commit -m "feat: add A2A message and agent card builders"
+```
+
+修复轮 1 另起一次提交（不 amend）：
+
+```bash
+git add src/a2a/messages.ts tests/a2a.messages.test.ts
+git commit -m "fix: harden A2A text extraction and trim artifact output"
 ```
 
 ---

@@ -112,6 +112,7 @@ muliuniuma/
 │  │  └─ index.ts
 │  ├─ a2a/
 │  │  ├─ card.ts              # 构造本 agent 的 AgentCard
+│  │  ├─ messages.ts          # 构造 A2A Message、提取文本（buildTextMessage / extractText）
 │  │  ├─ executor.ts          # A2A 请求 → AgentRuntime
 │  │  ├─ server.ts            # express server bootstrap
 │  │  ├─ client.ts            # A2AClientHub：调用远端 agent
