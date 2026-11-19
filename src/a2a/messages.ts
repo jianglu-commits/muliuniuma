@@ -38,7 +38,7 @@ export function extractText(message: Message): string {
 }
 
 function isMessage(result: SendMessageResult): result is Message {
-  return 'messageId' in result;
+  return 'messageId' in result && !('artifacts' in result);
 }
 
 export function extractResultText(result: SendMessageResult): string {
@@ -47,7 +47,7 @@ export function extractResultText(result: SendMessageResult): string {
   }
 
   const statusText = result.status?.message
-    ? extractText(result.status.message)
+    ? extractText(result.status.message).trim()
     : '';
   if (statusText) {
     return statusText;

@@ -44,6 +44,8 @@ function makeArtifact(parts: Part[]): Artifact {
   };
 }
 
+const HARDCODED_PROTOCOL_VERSION = /protocolVersion\s*:\s*['"]/;
+
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 't-1',
@@ -56,13 +58,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
-// 模拟远端返回的畸形数据：静态类型仍是 Task/Message，运行时缺字段。
-function withUndefinedArtifacts(task: Task): Task {
-  const copy: Task = { ...task };
-  Object.assign(copy, { artifacts: undefined });
-  return copy;
-}
-
+// 模拟远端返回的畸形数据：静态类型仍是 Message，运行时缺字段。
 function withUndefinedParts(message: Message): Message {
   const copy: Message = { ...message };
   Object.assign(copy, { parts: undefined });
@@ -205,8 +201,48 @@ describe('extractResultText', () => {
     expect(extractResultText(task)).toBe('第一段\n第二段');
   });
 
+  it('artifacts 拼接结果去掉首尾空白', () => {
+    const task = makeTask({
+      artifacts: [
+        makeArtifact([makePart({ $case: 'text', value: '  第一段' })]),
+        makeArtifact([makePart({ $case: 'text', value: '第二段  ' })]),
+      ],
+    });
+    expect(extractResultText(task)).toBe('第一段\n第二段');
+  });
+
+  it('同时含 messageId 与 artifacts 的混合载荷取 artifacts 文本', () => {
+    const mixed = Object.assign(
+      makeMessage([makePart({ $case: 'text', value: '消息文本' })]),
+      { artifacts: [makeArtifact([makePart({ $case: 'text', value: '产物文本' })])] },
+    );
+    expect(extractResultText(mixed)).toBe('产物文本');
+  });
+
+  it('status.message 文本先 trim：纯空白时落到 artifacts，非空白返回 trim 后的值', () => {
+    const blankStatus = makeTask({
+      status: {
+        state: TaskState.TASK_STATE_COMPLETED,
+        message: makeMessage([makePart({ $case: 'text', value: '   ' })]),
+        timestamp: undefined,
+      },
+      artifacts: [makeArtifact([makePart({ $case: 'text', value: '产物' })])],
+    });
+    expect(extractResultText(blankStatus)).toBe('产物');
+
+    const paddedStatus = makeTask({
+      status: {
+        state: TaskState.TASK_STATE_COMPLETED,
+        message: makeMessage([makePart({ $case: 'text', value: '  进行中  ' })]),
+        timestamp: undefined,
+      },
+      artifacts: [],
+    });
+    expect(extractResultText(paddedStatus)).toBe('进行中');
+  });
+
   it('artifacts 缺失的畸形 Task 返回空串而不抛错', () => {
-    const task = withUndefinedArtifacts(makeTask());
+    const task = makeTask({ artifacts: undefined });
     expect(extractResultText(task)).toBe('');
   });
 
@@ -280,12 +316,15 @@ describe('buildAgentCard', () => {
   });
 
   it('卡片源码不硬编码 protocolVersion 字面量', () => {
+    // A2A_PROTOCOL_VERSION 的当前值恰为 '1.0'，纯值断言无法区分「用常量」与「硬编码字面量」；SDK 升版后纯值断言会自然捕获分歧，所以这条是临时护栏。
     const source = readFileSync(
       new URL('../src/a2a/card.ts', import.meta.url),
       'utf8',
     );
-    expect(source).toContain('A2A_PROTOCOL_VERSION');
-    expect(source).not.toMatch(/protocolVersion:\s*['"]/);
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    expect(code).toContain('A2A_PROTOCOL_VERSION');
+    expect(code).not.toMatch(HARDCODED_PROTOCOL_VERSION);
+    expect(HARDCODED_PROTOCOL_VERSION.test("protocolVersion : '1.0'")).toBe(true);
   });
 
   it('skills[0] 的 inputModes 与 outputModes 和卡片默认一致', () => {
