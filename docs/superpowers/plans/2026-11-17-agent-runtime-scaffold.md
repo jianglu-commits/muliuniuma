@@ -1370,38 +1370,43 @@ git commit -m "feat: add local process sandbox with path and env isolation"
 
 **Files:**
 - Create: `src/sandbox/factory.ts`, `src/tools/sandbox-tool.ts`, `src/tools/index.ts`
-- Modify: `src/sandbox/index.ts`
+- Modify: `src/sandbox/index.ts`, `src/shared/errors.ts`
 - Test: `tests/tools.sandbox-tool.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/tools.sandbox-tool.test.ts`**
+- [x] **Step 1: 写失败的测试 `tests/tools.sandbox-tool.test.ts`**
 
 ```ts
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createSandbox } from '../src/sandbox/index.js';
+import { createSandbox, registerSandbox } from '../src/sandbox/index.js';
+import type { Sandbox, SandboxOptions } from '../src/sandbox/index.js';
 import { createSandboxTools } from '../src/tools/index.js';
+import { SandboxEscapeError, SandboxNotRegisteredError } from '../src/shared/index.js';
 
 let root: string;
+let sandbox: Sandbox | undefined;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'sandbox-tool-'));
+  sandbox = await createSandbox('local', {
+    id: 'tool-test',
+    root,
+    timeoutMs: 5_000,
+    maxOutputBytes: 4_096,
+  });
 });
 
 afterEach(async () => {
+  await sandbox?.dispose();
+  sandbox = undefined;
   await rm(root, { recursive: true, force: true });
 });
 
 describe('createSandboxTools', () => {
   it('sandbox_exec 执行命令并回传 JSON', async () => {
-    const sandbox = await createSandbox('local', {
-      id: 'tool-test',
-      root,
-      timeoutMs: 5_000,
-      maxOutputBytes: 4_096,
-    });
-    const tools = createSandboxTools(sandbox);
+    const tools = createSandboxTools(sandbox!);
     const execTool = tools.find((t) => t.name === 'sandbox_exec');
     expect(execTool).toBeDefined();
 
@@ -1409,31 +1414,98 @@ describe('createSandboxTools', () => {
     const parsed = JSON.parse(String(output)) as { stdout: string; exitCode: number };
     expect(parsed.stdout.trim()).toBe('hi');
     expect(parsed.exitCode).toBe(0);
-
-    await sandbox.dispose();
   });
 
   it('sandbox_write_file 写入后能读回', async () => {
-    const sandbox = await createSandbox('local', {
-      id: 'tool-test',
-      root,
-      timeoutMs: 5_000,
-      maxOutputBytes: 4_096,
-    });
-    const tools = createSandboxTools(sandbox);
+    const tools = createSandboxTools(sandbox!);
     const writeTool = tools.find((t) => t.name === 'sandbox_write_file');
     expect(writeTool).toBeDefined();
 
-    await writeTool!.invoke({ path: 'note.txt', content: 'hello' });
-    const read = await sandbox.readFile('note.txt');
+    const output = await writeTool!.invoke({ path: 'note.txt', content: 'hello' });
+    expect(output).toBe('已写入 note.txt');
+    const read = await sandbox!.readFile('note.txt');
     expect(new TextDecoder().decode(read)).toBe('hello');
+  });
 
-    await sandbox.dispose();
+  it('返回的工具恰好是 sandbox_exec 与 sandbox_write_file', () => {
+    const tools = createSandboxTools(sandbox!);
+    expect(tools.map((t) => t.name).sort()).toEqual(['sandbox_exec', 'sandbox_write_file']);
+  });
+
+  it('sandbox_exec 如实回传非零退出码', async () => {
+    const tools = createSandboxTools(sandbox!);
+    const execTool = tools.find((t) => t.name === 'sandbox_exec');
+
+    const output = await execTool!.invoke({ command: 'exit 3' });
+    const parsed = JSON.parse(String(output)) as { exitCode: number; timedOut: boolean };
+    expect(parsed.exitCode).toBe(3);
+    expect(parsed.timedOut).toBe(false);
+  });
+
+  it('sandbox_exec 透传 timeoutMs 并如实回传超时', async () => {
+    const tools = createSandboxTools(sandbox!);
+    const execTool = tools.find((t) => t.name === 'sandbox_exec');
+
+    const output = await execTool!.invoke({ command: 'sleep 5', timeoutMs: 300 });
+    const parsed = JSON.parse(String(output)) as { exitCode: number; timedOut: boolean };
+    expect(parsed.timedOut).toBe(true);
+    expect(parsed.exitCode).toBe(124);
+  });
+
+  it('sandbox_write_file 越界路径 reject SandboxEscapeError', async () => {
+    const tools = createSandboxTools(sandbox!);
+    const writeTool = tools.find((t) => t.name === 'sandbox_write_file');
+
+    await expect(
+      writeTool!.invoke({ path: '../escape.txt', content: 'x' }),
+    ).rejects.toBeInstanceOf(SandboxEscapeError);
+  });
+});
+
+describe('createSandbox 注册表', () => {
+  it('registerSandbox 注入的自定义工厂可被 createSandbox 使用', async () => {
+    const fake: Sandbox = {
+      id: 'fake',
+      workdir: root,
+      exec: async () => ({ stdout: 'fake', stderr: '', exitCode: 0, timedOut: false }),
+      writeFile: async () => {},
+      readFile: async () => new Uint8Array(),
+      dispose: async () => {},
+    };
+    let received: SandboxOptions | undefined;
+    registerSandbox('fake', async (options) => {
+      received = options;
+      return fake;
+    });
+
+    const options: SandboxOptions = {
+      id: 'fake-instance',
+      root,
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    };
+    const created = await createSandbox('fake', options);
+    expect(created).toBe(fake);
+    expect(received).toBe(options);
+  });
+
+  it('未注册的 kind 抛 SandboxNotRegisteredError，信息含 kind 与可用列表', async () => {
+    const error: unknown = await createSandbox('no-such-kind', {
+      id: 'missing',
+      root,
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SandboxNotRegisteredError);
+    expect((error as SandboxNotRegisteredError).code).toBe('SANDBOX_NOT_REGISTERED');
+    expect((error as SandboxNotRegisteredError).message).toContain('no-such-kind');
+    expect((error as SandboxNotRegisteredError).message).toContain('local');
   });
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/tools.sandbox-tool.test.ts
@@ -1441,9 +1513,26 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/tools/index.js"`。
 
-- [ ] **Step 3: 实现 `src/sandbox/factory.ts`**
+- [x] **Step 3: 新增 `SandboxNotRegisteredError` 并实现 `src/sandbox/factory.ts`**
+
+先在 `src/shared/errors.ts` 的 `ErrorCode` 联合里加 `'SANDBOX_NOT_REGISTERED'`，并对照 `ProviderNotRegisteredError` 新增错误类（barrel `src/shared/index.ts` 是 `export *`，自动覆盖）：
 
 ```ts
+export class SandboxNotRegisteredError extends AppError {
+  constructor(kind: string, availableKinds: readonly string[]) {
+    super(
+      'SANDBOX_NOT_REGISTERED',
+      `未注册的沙箱实现: "${kind}"。请调用 registerSandbox("${kind}", ...) 注册对应工厂。` +
+        `当前可用: ${availableKinds.join(', ')}`,
+    );
+  }
+}
+```
+
+提示措辞指向对外导出的 `registerSandbox(...)`，不要让用户去改源码。然后实现工厂：
+
+```ts
+import { SandboxNotRegisteredError } from '../shared/index.js';
 import { LocalProcessSandbox } from './local.js';
 import type { Sandbox, SandboxOptions } from './types.js';
 
@@ -1463,9 +1552,7 @@ export async function createSandbox(
 ): Promise<Sandbox> {
   const factory = factories.get(kind);
   if (!factory) {
-    throw new Error(
-      `未知的沙箱实现: "${kind}"。可用: ${[...factories.keys()].join(', ')}`,
-    );
+    throw new SandboxNotRegisteredError(kind, [...factories.keys()]);
   }
   return factory(options);
 }
@@ -1473,7 +1560,7 @@ export async function createSandbox(
 
 这是 spec §12 的扩展点：新增 Docker / E2B 实现只需 `registerSandbox('docker', ...)`，上层不感知。
 
-- [ ] **Step 4: 修改 `src/sandbox/index.ts`**
+- [x] **Step 4: 修改 `src/sandbox/index.ts`**
 
 ```ts
 export * from './types.js';
@@ -1481,14 +1568,15 @@ export * from './local.js';
 export * from './factory.js';
 ```
 
-- [ ] **Step 5: 实现 `src/tools/sandbox-tool.ts`**
+- [x] **Step 5: 实现 `src/tools/sandbox-tool.ts`**
 
 ```ts
 import { tool } from 'langchain';
 import { z } from 'zod';
+import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { Sandbox } from '../sandbox/index.js';
 
-export function createSandboxTools(sandbox: Sandbox) {
+export function createSandboxTools(sandbox: Sandbox): StructuredToolInterface[] {
   const execTool = tool(
     async ({ command, timeoutMs }) => {
       const result = await sandbox.exec(command, timeoutMs ? { timeoutMs } : {});
@@ -1524,24 +1612,24 @@ export function createSandboxTools(sandbox: Sandbox) {
 }
 ```
 
-- [ ] **Step 6: 实现 `src/tools/index.ts`**
+- [x] **Step 6: 实现 `src/tools/index.ts`**
 
 ```ts
 export * from './sandbox-tool.js';
 ```
 
-- [ ] **Step 7: 运行测试确认通过**
+- [x] **Step 7: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/tools.sandbox-tool.test.ts
 ```
 
-预期：PASS，2 个用例。
+预期：PASS，8 个用例（简报 2 个 + 注册表扩展点与工具关键路径 6 个）。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
-git add src/sandbox src/tools tests/tools.sandbox-tool.test.ts
+git add src/sandbox src/tools src/shared/errors.ts tests/tools.sandbox-tool.test.ts
 git commit -m "feat: add sandbox factory and sandbox tools"
 ```
 
