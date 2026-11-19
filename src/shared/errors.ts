@@ -62,3 +62,9 @@ export class SkillParseError extends AppError {
     super('SKILL_PARSE_FAILED', message, options);
   }
 }
+
+export class A2APeerError extends AppError {
+  constructor(peer: string, reason: string, options?: { cause?: unknown }) {
+    super('A2A_PEER_UNREACHABLE', `A2A peer "${peer}" 不可用: ${reason}`, options);
+  }
+}
