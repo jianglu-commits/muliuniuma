@@ -258,14 +258,14 @@ describe('mergeToolGroups', () => {
   });
 });
 
-function makeConfig(root: string): AppConfig {
+function makeConfig(root: string, checkpointDb?: string): AppConfig {
   return loadConfig({
     LLM_PROVIDER: 'openai-compatible',
     LLM_MODEL: 'gpt-4o-mini',
     LLM_BASE_URL: 'https://example.com/v1',
     LLM_API_KEY: 'sk-test',
     SKILLS_DIR: join(root, 'skills'),
-    CHECKPOINT_DB: join(root, 'data', 'checkpoints.sqlite'),
+    CHECKPOINT_DB: checkpointDb ?? join(root, 'data', 'checkpoints.sqlite'),
     MCP_CONFIG: join(root, 'mcp.json'),
     A2A_PEERS: join(root, 'peers.json'),
     SANDBOX_ROOT: join(root, 'sandbox'),
@@ -547,6 +547,78 @@ describe('AgentRuntime', () => {
     const sandboxRoot = join(root!, 'sandbox');
     expect(existsSync(sandboxRoot)).toBe(true);
     expect(await readdir(sandboxRoot)).toEqual([]);
+  });
+
+  it('MCP 建连后启动失败时关闭 MCP 连接', async () => {
+    const serverPath = join(root!, 'mcp-exec-server.mjs');
+    await writeFile(serverPath, MCP_EXEC_SERVER_SOURCE);
+    await writeFile(
+      join(root!, 'mcp.json'),
+      JSON.stringify({
+        servers: {
+          sandbox: {
+            transport: 'stdio',
+            command: process.execPath,
+            args: [serverPath],
+            stderr: 'ignore',
+          },
+        },
+      }),
+    );
+
+    // checkpoint 目录的父路径是一个普通文件 → mkdir 必然 ENOTDIR；
+    // 该步骤排在 MCP 建连之后，用来验证已拉起的 MCP 子进程也会被回收。
+    const blocker = join(root!, 'blocker');
+    await writeFile(blocker, 'not-a-dir');
+
+    const closeSpy = vi.spyOn(McpHub.prototype, 'close');
+    try {
+      await expect(
+        AgentRuntime.create(
+          makeConfig(root!, join(blocker, 'checkpoints.sqlite')),
+          { model: new FakeListChatModel({ responses: ['模型回答'] }) },
+        ),
+      ).rejects.toThrow(/EEXIST|ENOTDIR/);
+
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('启动清理失败时留下 warn 日志', async () => {
+    await writeFile(
+      join(root!, 'mcp.json'),
+      JSON.stringify({ servers: { broken: 'not-an-object' } }),
+    );
+
+    const sandboxSpy = vi
+      .spyOn(LocalProcessSandbox.prototype, 'dispose')
+      .mockImplementation(async (): Promise<void> => {
+        throw new Error('模拟沙箱清理失败');
+      });
+
+    const lines: string[] = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    });
+
+    try {
+      await expect(
+        AgentRuntime.create(makeConfig(root!), {
+          model: new FakeListChatModel({ responses: ['模型回答'] }),
+        }),
+      ).rejects.toThrow(/broken/);
+    } finally {
+      stderrSpy.mockRestore();
+      sandboxSpy.mockRestore();
+    }
+
+    const warn = lines.find((line) => line.includes('[warn] app:agent:'));
+    expect(warn).toBeDefined();
+    expect(warn).toContain('沙箱');
+    expect(warn).toContain('模拟沙箱清理失败');
   });
 
   it('MCP 连接失败走注入的 logger', async () => {

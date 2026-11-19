@@ -16,6 +16,7 @@ import type { SkillManifest } from '../skills/index.js';
 import { McpHub } from '../mcp/index.js';
 import { A2AClientHub, createRemoteAgentTools } from '../a2a/index.js';
 import { createLogger } from '../shared/index.js';
+import type { Logger } from '../shared/index.js';
 import { mergeToolGroups } from './tools.js';
 
 export interface AgentRuntimeDeps {
@@ -45,12 +46,16 @@ export function extractFinalText(messages: BaseMessage[]): string {
   return '';
 }
 
-/** 清理失败不能顶替掉调用方真正关心的原始异常。 */
-async function ignoreFailure(close: () => Promise<void> | void): Promise<void> {
+/** 清理失败不能顶替掉调用方真正关心的原始异常，但必须留下可观测痕迹。 */
+async function ignoreFailure(
+  close: () => Promise<void> | void,
+  logger: Logger,
+  label: string,
+): Promise<void> {
   try {
     await close();
-  } catch {
-    // 忽略
+  } catch (error) {
+    logger.warn(`${label}清理失败，已忽略`, error);
   }
 }
 
@@ -84,9 +89,10 @@ export class AgentRuntime {
     });
 
     let checkpointer: SqliteSaver | undefined;
+    let mcpHub: McpHub | undefined;
     try {
       const skillRegistry = new SkillRegistry(await loadSkills(config.skillsDir));
-      const mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
+      mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
       const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath, appLogger.child('a2a'));
 
       const tools = mergeToolGroups(
@@ -129,11 +135,14 @@ export class AgentRuntime {
         prompt,
       );
     } catch (error) {
-      // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录。
-      await ignoreFailure(() => sandbox.dispose());
+      // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录，
+      // MCP 建连拉起的 stdio 子进程也会变成孤儿进程。
+      const cleanupLogger = appLogger.child('agent');
+      await ignoreFailure(() => mcpHub?.close(), cleanupLogger, 'MCP 连接');
+      await ignoreFailure(() => sandbox.dispose(), cleanupLogger, '沙箱');
       const created = checkpointer;
       if (created !== undefined) {
-        await ignoreFailure(() => created.db.close());
+        await ignoreFailure(() => created.db.close(), cleanupLogger, '检查点数据库');
       }
       throw error;
     }
