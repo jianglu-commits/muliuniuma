@@ -4,7 +4,10 @@ import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/s
 import { buildTextMessage, extractText } from './messages.js';
 
 export interface AgentRunner {
-  run(input: string, options: { threadId: string }): Promise<{ text: string }>;
+  run(
+    input: string,
+    options: { threadId: string; signal?: AbortSignal },
+  ): Promise<{ text: string }>;
 }
 
 interface ActiveTask {
@@ -39,16 +42,24 @@ export class A2AAgentExecutor implements AgentExecutor {
       }),
     );
 
+    const controller = new AbortController();
     let signalCancel: () => void = () => {};
     const cancelled = new Promise<void>((resolve) => {
       signalCancel = resolve;
     });
-    this.activeTasks.set(taskId, { contextId, cancel: signalCancel });
+    this.activeTasks.set(taskId, {
+      contextId,
+      // 必须先 resolve 再 abort：cancelled 要比 runner 的 AbortError 早一个微任务赢下 race，否则 execute 抛出会被 SDK 合成 FAILED。
+      cancel: () => {
+        signalCancel();
+        controller.abort();
+      },
+    });
 
     try {
       const outcome: RunOutcome = await Promise.race([
         this.runner
-          .run(extractText(userMessage), { threadId: contextId })
+          .run(extractText(userMessage), { threadId: contextId, signal: controller.signal })
           .then((result): RunOutcome => ({ kind: 'done', text: result.text })),
         cancelled.then((): RunOutcome => ({ kind: 'cancelled' })),
       ]);
@@ -74,6 +85,7 @@ export class A2AAgentExecutor implements AgentExecutor {
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
     const active = this.activeTasks.get(taskId);
+    // 空串兜底在正常流不可达：正常取消时 active 必在；二次取消因任务已 CANCELED 被 SDK 幂等返回，不再调 executor。
     const contextId = active?.contextId ?? '';
     eventBus.publish(
       AgentEvent.statusUpdate({

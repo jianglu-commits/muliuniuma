@@ -148,10 +148,13 @@ export class AgentRuntime {
     }
   }
 
-  async run(input: string, options: { threadId: string }): Promise<RunResult> {
+  async run(
+    input: string,
+    options: { threadId: string; signal?: AbortSignal },
+  ): Promise<RunResult> {
     const result = await this.agent.invoke(
       { messages: [{ role: 'human', content: input }] },
-      { configurable: { thread_id: options.threadId } },
+      { configurable: { thread_id: options.threadId }, signal: options.signal },
     );
 
     const messages: BaseMessage[] = result.messages;

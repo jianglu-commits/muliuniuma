@@ -369,6 +369,18 @@ describe('AgentRuntime', () => {
     expect(result.text).toBe('模型回答');
   });
 
+  it('run 把已 abort 的 signal 转发给 agent 并拒绝', async () => {
+    runtime = await AgentRuntime.create(makeConfig(root!), {
+      model: new FakeListChatModel({ responses: ['模型回答'] }),
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runtime.run('你好', { threadId: 't-abort', signal: controller.signal }),
+    ).rejects.toThrow(/aborted/i);
+  });
+
   it('同一 threadId 的第二次调用能看到历史消息', async () => {
     runtime = await AgentRuntime.create(makeConfig(root!), {
       model: new FakeListChatModel({ responses: ['第一轮', '第二轮'] }),

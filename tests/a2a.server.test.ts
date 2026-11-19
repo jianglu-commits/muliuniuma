@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import type { Express } from 'express';
 import { ClientFactory } from '@a2a-js/sdk/client';
@@ -54,6 +54,7 @@ async function listen(app: Express, port: number): Promise<void> {
 
 // fetch/undici 会保持 keep-alive 连接，不主动销毁会让 server.close() 一直等待。
 afterEach(async () => {
+  vi.restoreAllMocks();
   const server = httpServer;
   httpServer = undefined;
   if (server) {
@@ -248,6 +249,51 @@ describe('A2A HTTP server', () => {
     expect(['task', 'message']).toContain(events[0]?.kind);
   });
 
+  it('取消时 runner 收到已 abort 的 signal 且 execute 正常返回', async () => {
+    let seenSignal: AbortSignal | undefined;
+    let runnerSettled = false;
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const runner: AgentRunner = {
+      run: (_input, options) =>
+        new Promise<{ text: string }>((_resolve, reject) => {
+          seenSignal = options.signal;
+          markStarted();
+          // 在 abort 监听里同步 reject 是最坏的微任务时序：取消仍必须走 return 而不是抛出。
+          options.signal?.addEventListener('abort', () => {
+            runnerSettled = true;
+            reject(new DOMException('This operation was aborted', 'AbortError'));
+          });
+        }),
+    };
+    const executor = new A2AAgentExecutor(runner);
+    const bus = new DefaultExecutionEventBus();
+    const events: AgentExecutionEvent[] = [];
+    bus.on('event', (event) => {
+      events.push(event);
+    });
+    const requestContext = new RequestContext(
+      { tenant: '', message: userMessage('慢慢跑'), configuration: undefined, metadata: undefined },
+      'task-abort',
+      'ctx-abort',
+      new ServerCallContext(),
+    );
+
+    const execution = executor.execute(requestContext, bus);
+    await started;
+    await executor.cancelTask('task-abort', bus);
+
+    await expect(execution).resolves.toBeUndefined();
+    expect(seenSignal?.aborted).toBe(true);
+    expect(runnerSettled).toBe(true);
+    const states = events.flatMap((event) =>
+      event.kind === 'statusUpdate' ? [event.data.status?.state] : [],
+    );
+    expect(states).toEqual([TaskState.TASK_STATE_CANCELED]);
+  });
+
   it('服务端拒绝以 statusUpdate 开头的执行流', async () => {
     const port = await reservePort();
     const baseUrl = `http://127.0.0.1:${port}`;
@@ -282,6 +328,7 @@ describe('A2A HTTP server', () => {
     );
     await listen(app, port);
     const client = await new ClientFactory().createFromUrl(baseUrl);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await expect(
       client.sendMessage({
@@ -290,7 +337,33 @@ describe('A2A HTTP server', () => {
         configuration: undefined,
         metadata: undefined,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/without a result/);
+
+    const warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    expect(warnings.some((line) => line.includes('unknown task bad-task'))).toBe(true);
+  });
+
+  it('runner 抛错时任务落到 FAILED 终态', async () => {
+    const runner: AgentRunner = {
+      run: async () => {
+        throw new Error('模型炸了');
+      },
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { client } = await startAgentServer(runner);
+
+    const result = await client.sendMessage({
+      tenant: '',
+      message: userMessage('会失败'),
+      configuration: undefined,
+      metadata: undefined,
+    });
+
+    const failed = expectTask(result);
+    expect(failed.status?.state).toBe(TaskState.TASK_STATE_FAILED);
+    const failureText = failed.status?.message ? extractText(failed.status.message) : '';
+    expect(failureText).toContain('模型炸了');
+    expect(errorSpy).toHaveBeenCalled();
   });
 
   it('Client.cancelTask 触发 executor 取消并发布终态 canceled statusUpdate', async () => {
