@@ -56,13 +56,15 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH"
 
 ## Task 1: 工具链与仓库基建
 
+**状态：已完成。** 本节代码块为原始设计稿；与最终实现的逐条差异见账本 `.superpowers/sdd/2026-11-17-agent-runtime-scaffold/progress.md` 的「Task 1:」条目。
+
 **Files:**
 - Create: `tsconfig.json`, `tsconfig.build.json`, `vitest.config.ts`, `.nvmrc`, `.gitignore`, `.env.example`
 - Create: `config/mcp.servers.json`, `config/a2a.peers.json`
 - Create: `scripts/check-node.ts`
 - Verify (已存在，无需改动): `package.json`（scripts 与 engines 已按 §8 写好）、`pnpm-lock.yaml`（依赖已安装成功）
 
-- [ ] **Step 1: 写 `tsconfig.json`**
+- [x] **Step 1: 写 `tsconfig.json`**
 
 ```json
 {
@@ -89,7 +91,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH"
 
 `verbatimModuleSyntax: true` 强制类型导入写成 `import type`，能提前暴露误用的运行时导入。
 
-- [ ] **Step 2: 写 `tsconfig.build.json`**
+- [x] **Step 2: 写 `tsconfig.build.json`**
 
 ```json
 {
@@ -105,7 +107,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH"
 }
 ```
 
-- [ ] **Step 3: 写 `vitest.config.ts`**
+- [x] **Step 3: 写 `vitest.config.ts`**
 
 ```ts
 import { defineConfig } from 'vitest/config';
@@ -120,7 +122,7 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 4: 写 `.nvmrc`、`.gitignore`、`.env.example`**
+- [x] **Step 4: 写 `.nvmrc`、`.gitignore`、`.env.example`**
 
 `.nvmrc`：
 
@@ -167,7 +169,7 @@ A2A_DESCRIPTION=可扩展的 TypeScript Agent 运行时
 LOG_LEVEL=info
 ```
 
-- [ ] **Step 5: 写 `config/mcp.servers.json` 与 `config/a2a.peers.json`**
+- [x] **Step 5: 写 `config/mcp.servers.json` 与 `config/a2a.peers.json`**
 
 `config/mcp.servers.json`：
 
@@ -185,7 +187,7 @@ LOG_LEVEL=info
 }
 ```
 
-- [ ] **Step 6: 写 `scripts/check-node.ts`**
+- [x] **Step 6: 写 `scripts/check-node.ts`**
 
 ```ts
 const REQUIRED_MAJOR = 22;
@@ -211,7 +213,7 @@ if (tooOld) {
 
 次版本下限 12 来自 `vitest@5.1.0` 的 engines（`^22.12.0 || ^24.0.0 || >=26.0.0`）——只比主版本会让 Node 22.0–22.11 通过守卫却死在 vitest 上。提示语用 `nvm use` 而非写死版本号，避免与仓库 `.nvmrc`（24）矛盾。
 
-- [ ] **Step 7: 验证**
+- [x] **Step 7: 验证**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typecheck
@@ -229,7 +231,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v18.17.0/bin:$PATH" && node scrip
 
 **验证命令必须用 `pnpm tsx` 而不是裸 `node`**：Node 18 没有原生 TS 类型剥离能力，裸 `node scripts/check-node.ts` 会先报 `ERR_UNKNOWN_FILE_EXTENSION` 而走不到守卫逻辑。`package.json` 的 `dev`/`serve` 脚本走的就是 `tsx`。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add tsconfig.json tsconfig.build.json vitest.config.ts .nvmrc .gitignore .env.example config scripts
@@ -240,11 +242,13 @@ git commit -m "chore: add toolchain config, gitignore and env template"
 
 ## Task 2: 错误类型与日志
 
+**状态：已完成。** 本节代码块为原始设计稿；与最终实现的逐条差异见账本 `.superpowers/sdd/2026-11-17-agent-runtime-scaffold/progress.md` 的「Task 2:」条目。
+
 **Files:**
 - Create: `src/shared/errors.ts`, `src/shared/logger.ts`, `src/shared/index.ts`
 - Test: `tests/shared.errors.test.ts`, `tests/shared.logger.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/shared.errors.test.ts`**
+- [x] **Step 1: 写失败的测试 `tests/shared.errors.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -280,7 +284,7 @@ describe('AppError', () => {
 });
 ```
 
-- [ ] **Step 2: 写失败的测试 `tests/shared/logger.test.ts`**
+- [x] **Step 2: 写失败的测试 `tests/shared/logger.test.ts`**
 
 ```ts
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -314,7 +318,7 @@ describe('createLogger', () => {
 });
 ```
 
-- [ ] **Step 3: 运行测试确认失败**
+- [x] **Step 3: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/shared.errors.test.ts tests/shared/logger.test.ts
@@ -322,7 +326,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，报 `Failed to resolve import "../src/shared/index.js"`。
 
-- [ ] **Step 4: 实现 `src/shared/errors.ts`**
+- [x] **Step 4: 实现 `src/shared/errors.ts`**
 
 ```ts
 export type ErrorCode =
@@ -380,7 +384,7 @@ export class SkillParseError extends AppError {
 }
 ```
 
-- [ ] **Step 5: 实现 `src/shared/logger.ts`**
+- [x] **Step 5: 实现 `src/shared/logger.ts`**
 
 ```ts
 import { inspect } from 'node:util';
@@ -452,14 +456,14 @@ export function createLogger(level: LogLevel, scope = 'app'): Logger {
 
 三处刻意的偏离（均为评审驱动）：`rest` 用 `inspect` 而非 `String` 保真渲染并与消息同行；未知 level fail closed 到 info 阈值；查表用 `Object.hasOwn` 排除 `Object.prototype` 继承键。
 
-- [ ] **Step 6: 实现 `src/shared/index.ts`**
+- [x] **Step 6: 实现 `src/shared/index.ts`**
 
 ```ts
 export * from './errors.js';
 export * from './logger.js';
 ```
 
-- [ ] **Step 7: 运行测试确认通过**
+- [x] **Step 7: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/shared.errors.test.ts tests/shared/logger.test.ts
@@ -467,7 +471,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：2 个文件全部 PASS。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add src/shared tests/shared.errors.test.ts tests/shared/logger.test.ts
@@ -478,11 +482,13 @@ git commit -m "feat: add shared error types and leveled logger"
 
 ## Task 3: 配置加载
 
+**状态：已完成。** 本节代码块为原始设计稿；与最终实现的逐条差异见账本 `.superpowers/sdd/2026-11-17-agent-runtime-scaffold/progress.md` 的「Task 3:」条目。
+
 **Files:**
 - Create: `src/config/env.ts`, `src/config/index.ts`
 - Test: `tests/config.env.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/config.env.test.ts`**
+- [x] **Step 1: 写失败的测试 `tests/config.env.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -526,7 +532,7 @@ describe('loadConfig', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/config.env.test.ts
@@ -534,7 +540,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/config/index.js"`。
 
-- [ ] **Step 3: 实现 `src/config/env.ts`**
+- [x] **Step 3: 实现 `src/config/env.ts`**
 
 ```ts
 import { z } from 'zod';
@@ -649,13 +655,13 @@ zod v4 的 `safeParse` 错误结构是 `error.issues`，每项有 `path` 与 `me
 - `loadConfig` 保持纯函数（可注入 env、不读文件、不改 `process.env`）；`.env` 由入口在调用前显式加载。
 - 测试除简报的 4 个用例外，还覆盖：错误类型与 `code` 断言、`loadConfig()` 默认参数路径（读真实 `process.env`，用保存-恢复模式清理）。
 
-- [ ] **Step 4: 实现 `src/config/index.ts`**
+- [x] **Step 4: 实现 `src/config/index.ts`**
 
 ```ts
 export * from './env.js';
 ```
 
-- [ ] **Step 5: 运行测试确认通过**
+- [x] **Step 5: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/config.env.test.ts
@@ -663,7 +669,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：PASS，4 个用例。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/config tests/config.env.test.ts
@@ -674,11 +680,13 @@ git commit -m "feat: add zod-validated environment configuration"
 
 ## Task 4: LLM provider 抽象
 
+**状态：已完成。** 本节代码块为原始设计稿；与最终实现的逐条差异见账本 `.superpowers/sdd/2026-11-17-agent-runtime-scaffold/progress.md` 的「Task 4:」条目。
+
 **Files:**
 - Create: `src/llm/types.ts`, `src/llm/factory.ts`, `src/llm/index.ts`
 - Test: `tests/llm.factory.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/llm.factory.test.ts`**
+- [x] **Step 1: 写失败的测试 `tests/llm.factory.test.ts`**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -720,7 +728,7 @@ describe('createChatModel', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/llm.factory.test.ts
@@ -728,7 +736,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/llm/index.js"`。
 
-- [ ] **Step 3: 实现 `src/llm/types.ts`**
+- [x] **Step 3: 实现 `src/llm/types.ts`**
 
 ```ts
 export type ProviderId =
@@ -748,7 +756,7 @@ export interface ModelSpec {
 }
 ```
 
-- [ ] **Step 4: 实现 `src/llm/factory.ts`**
+- [x] **Step 4: 实现 `src/llm/factory.ts`**
 
 ```ts
 import { ChatOpenAI } from '@langchain/openai';
@@ -791,14 +799,14 @@ registerProvider('openai-compatible', openAiFactory);
 
 **实际落地不需要任何类型断言**：`@langchain/openai@1.8.4` 与顶层安装的是同一个物理 `@langchain/core@1.4.1` 实例，`BaseChatOpenAI extends BaseChatModel`，所以 `ChatOpenAI` 本身就是 `BaseChatModel` 的子类，直接向上转型即可。计划初稿里的 `as unknown as BaseChatModel` 会短路类型检查（万一将来两个包实例分裂，tsc 不会报错而问题推迟到运行时），已删除。
 
-- [ ] **Step 5: 实现 `src/llm/index.ts`**
+- [x] **Step 5: 实现 `src/llm/index.ts`**
 
 ```ts
 export * from './types.js';
 export * from './factory.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/llm.factory.test.ts
@@ -806,7 +814,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：PASS，3 个用例。
 
-- [ ] **Step 7: 类型检查**
+- [x] **Step 7: 类型检查**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typecheck
@@ -814,7 +822,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typec
 
 预期：退出码 0。若 ChatOpenAI 的断言报错，按 Step 4 的说明调整后重跑。
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add src/llm tests/llm.factory.test.ts
@@ -2452,9 +2460,47 @@ git commit -m "fix: validate skill tool description and keep renamed tool proxy 
 
 **Files:**
 - Create: `src/mcp/config.ts`, `src/mcp/hub.ts`, `src/mcp/index.ts`
+- Create: `tests/fixtures/mcp-echo-server.mjs`（真实 stdio MCP server 夹具，见 R10）
 - Test: `tests/mcp.hub.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/mcp.hub.test.ts`**
+**状态：已完成**（commits `cd65fec..0afddc0`，审查 Approved + 1 修复轮后复审 Approved；基线 9 文件 / 126 测试，typecheck 与 build 均 exit 0，无子进程残留）
+
+> **实现偏离简报之处（控制器裁决 R1–R11，下方代码为最终落地版本）**
+>
+> - **R1**：`readFile` 的 catch **只吞 ENOENT**，其余错误继续抛。简报的 bare catch 会把权限不足/路径是目录误报成「没有配置」，与 Task 3 / Task 7 已修掉的同类。
+> - **R2**：JSON 解析失败 → 抛 `ConfigError`，含**文件路径**与「JSON 解析失败」字样，带 `{ cause }`。简报静默返回 `{}` 会让手写坏掉的配置静默变成「零 MCP 工具」。
+> - **R3**：顶层必须是非 null 普通对象；`servers` 键**缺失** → 视为空（spec §6.4「空对象」）；`servers` 非普通对象、或某 server 值非普通对象 → `ConfigError` 含路径与 server 名。
+>   **spec 措辞裁决**：spec §5/§10.6 写「空**数组**」，但 SDK 规范形状是 `{servers: Record<string, Connection>}`，仓库实际文件是 `{"servers":{}}`。裁定「空数组」是「未声明任何 server」的宽松措辞，规范形状以 SDK 对象形为准；**不**为字面兼容 `[]` 加特例分支。措辞精确化已路由 Task 14。
+> - **R4**：**不手写重复的 Connection zod schema**（SDK 的 schema 不可从包根导入，且会漂移，违反 spec §5「自身只保留配置加载/ 生命周期 / 工具命名空间」）。构造期错误包装成含路径的 `ConfigError` 带 `{ cause }`。
+>   **`as` 的界定**：Task 4 / Task 8 禁的是 `as never` / `as unknown as`（断言之后**没有任何校验**）。本任务允许在 SDK 边界处**一次** `as MCPAdapterConfig['servers']`，前提是 (a) 值已过 R3 结构校验、(b) 紧接着由 SDK 构造器做权威 zod 校验且失败被包装成 `ConfigError` 大声 surfaced、(c) 加一行注释说明。**必须有测试证明畸形连接配置产出含文件路径的 `ConfigError`**。除这一处外不得新增其他 `as` 断言。
+> - **R5**：`onConnectionError` 必须是**记录告警后正常返回的 handler**，**不是** `'ignore'`（`'ignore'` 是静默跳过、不产生告警，不满足 spec §6.4「只记录告警并跳过该 server」）。告警信息**必须含 `serverName`** 与错误内容。handler **不得抛错**。
+> - **R6**：用项目 logger，**不用 `console.warn`**。`fromConfig(file: string, logger?: Logger)`，默认 `createLogger('info', 'mcp')`。
+>   **措辞修正（修复轮后控制器裁定）**：R6 原文写「R5 的告警与 R7 的错误都走这个 logger」。修正为「**R5 的告警走注入的 logger；R7 的错误以异常形式传播、由上层统一呈现，不重复记录**」——R7 的路径若 hub 再打一条 warn，会在 CLI 层造成同一错误重复输出两遍。故 R7 路径**不**调 logger。
+> - **R7**：`tools()` **不得 blanket catch 吞成空集**。R5 的 handler 已处理「单 server 连接失败」（spec 唯一承诺容忍的失败类）；逃出 `listTools()` 的都是真错误（工具名碰撞 `MCPClientError`、`throwOnLoadError` 默认 true）。必须传播，但包装成 `ConfigError`，含**文件路径** + **底层 SDK 原始 message 原文**（SDK 碰撞信息含可操作指引如「Remove the duplicate on the server」，必须保留），带 `{ cause }`。
+> - **R8**：显式传 `prefixToolNameWithServerName: true`（SDK 默认已是 true，但默认值可能随版本变化，而工具名是 Task 12 合并与模型可见的契约），并有测试断言名字恰为 `<serverName>_<toolName>`。**不**设 `additionalToolNamePrefix`，**不**设 `throwOnLoadError: false`。
+> - **R9**：`close()` 幂等；`close()` 后 `tools()` **必须抛明确错误**，**不得**透传到 SDK 触发重新发现（SDK 会重新 spawn 子进程 → 泄漏）。用 `ConfigError` 还是裸 `Error` 由实现者判断——实现者选了裸 `Error`，理由是这是**调用方程序错误**，不该复用会被 catch-and-continue 吞掉的领域错误类型（Task 8 复审同款裁定）。
+> - **R10**：简报只放**一个**坏 server 再断言 `tools() == []`——这**证明不了** spec 的核心承诺「单 server 失败不影响其余 server」（整个 hub 死掉也会让该断言通过）。控制器实证**手写最小 stdio MCP server 完全可行**（无需新增依赖、无需 mock），给出实跑通过的夹具源码与协议要点（`initialize` 回 `protocolVersion: req.params?.protocolVersion`；`tools/list` 返回 `{tools:[...]}`；`tools/call` 返回 `{content:[{type:'text',text:'pong'}]}`；stdin 上的换行分隔 JSON-RPC 2.0）。测试**不 mock `MCPAdapter`**，断言 logger 用注入的记录式假 logger。
+> - **R11**：`tools(): Promise<DynamicStructuredTool[]>`（与 SDK 一致，spec §6.4 同款），`import type` 自 `@langchain/core/tools`。`fromConfig` / `tools` / `close` 都要显式返回类型。
+>
+> **修复轮 1**（评审 12 条 Minor 中裁定打包修 4 条）：
+> - **A**：`close()` 改为缓存 `closing` promise —— 并发调用**共享并 await 同一个** promise（不提前 return）；失败时以身份比较（`this.closing === attempt`）清缓存**允许重试**；`closed` 标志保留，R9 行为不变。待 await 的 promise 用**局部变量**持有，不能让 `await` 读到刚被清空的字段。
+> - **B**：构造期错误按 `isZodError` 分两类措辞：zod 校验错误 →「MCP 配置文件校验失败」，其余 →「初始化 MCP 客户端失败」（不指向用户配置）；两者都保留文件路径与 `{ cause }`。判据 `error.name === 'ZodError'`（鸭子类型，**实测**在 zod@4.6.7 下成立），不用 `instanceof` 以免引入 zod 运行时类与双包实例风险。
+> - **C**：`errorMessage` 增「带字符串 `message` 的普通对象」兜底，避免退化成 `[object Object]`。
+> - **D**：碰撞用例由 4 次 `tools()` 调用合并为 1 次调用 + 4 条等强断言（SDK discovery 与子进程 spawn 由 4 次降为 1 次）。
+> - 附带新增**可测性接缝**：导出 `McpAdapterLike`（成员只含 `listTools` / `close`）、构造器 `private` → `protected`、新增 `protected static createAdapter`；测试用子类覆写注入替身。**未改变** `fromConfig` 签名、`tools()` 返回类型、`close()` 契约。
+>
+> **已实证的 SDK 事实（后续任务直接复用，勿再猜测）**：`MCPAdapter` 由包根导出（`MultiServerMCPClient` 是别名）；`ClientConfig` 与扁平 `Record<string, Connection>` 构造重载、`getTools()`、`initializeConnections()` 均已 `@deprecated`；**构造器即时 `adapterConfigSchema.parse`**（缺 `command`/`args` 或非法 `transport` 当场抛 `ZodError`）；`prefixToolNameWithServerName` 默认 `true`、格式 `<serverName>_<toolName>`（`client.js:78` / `tools.js:199`）；`throwOnLoadError` 默认 `true`（`types.js:505`）；**`listTools()` 在工具名碰撞时抛 `MCPClientError`**（`client.d.ts:46`）；`ConnectionErrorHandler` 形状 `(params:{serverName,error}) => void|Promise<void>`，**正常返回即视为忽略该 server**（`types.d.ts:1502-1511`）；`onConnectionError` 默认 `'throw'`（`client.d.ts:34`）；生命周期：`listTools()` 两次返回同一批工具对象、`close()` 幂等、**`close()` 后再 `listTools()` 会重新 spawn**（`client.d.ts:173-177`）；包根**只导出 `HTTPConnectionSchema` 一个 schema**，无 `./types` 子路径。
+>
+> **路由到 Task 12 / Task 14**：
+> - Task 12 消费 MCP 错误时按 `cause instanceof MCPClientError` 分流，**不要**一律当 `CONFIG_INVALID` 提示「请检查 config/mcp.servers.json」（那会把用户引向错误的修复方向——真正要改的是远端 server）。
+> - Task 12 装配时必须以 **`McpHub.fromConfig(...)` 的方法调用形式**调用（不能解构，`fromConfig` 依赖静态 `this`），并注入 `createLogger(config.logLevel, 'app').child('mcp')`，否则 R6 的可注入 logger 与 `LOG_LEVEL` 永不生效。
+> - Task 14 让 README 与验收清单的「空数组」措辞精确化为 SDK 的对象形。
+>
+> **deferred 的 Minor**（最终整分支评审再定）：外部模块可继承 `McpHub` 并用 public 构造器绕过 `loadMcpServers` 手工构造路径；`fromConfig` 硬编码 `new McpHub(...)` 而非 `new this(...)`；`isZodError` 的误判方向（加 `'issues' in error` 可收紧）；`hasMessage` 读取 `value.message` 两次；`loadMcpServers` 公共返回类型放宽为 `Record<string, unknown>`（R4 的正确后果，残留成本是 barrel 暴露了未经 SDK 校验的记录）。
+
+- [x] **Step 1: 写失败的测试 `tests/mcp.hub.test.ts`**
+
+下方为简报原始的 3 个用例（全部保留、断言未删改）。最终落地 **21 个用例** = 简报 3 + R10 要求的 13 + 修复轮 5。
 
 ```ts
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -2513,7 +2559,7 @@ describe('McpHub', () => {
 
 第三个用例验证 `onConnectionError: 'ignore'` 生效——否则这里会抛错。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/mcp.hub.test.ts
@@ -2521,98 +2567,207 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/mcp/index.js"`。
 
-- [ ] **Step 3: 实现 `src/mcp/config.ts`**
+- [x] **Step 3: 实现 `src/mcp/config.ts`**（最终落地版本）
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import type { MCPAdapterConfig } from '@langchain/mcp-adapters';
+import { ConfigError } from '../shared/index.js';
 
-export type McpServers = MCPAdapterConfig['servers'];
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
-export async function loadMcpServers(file: string): Promise<McpServers> {
+/**
+ * 只有「文件不存在」（ENOENT）会被静默忽略；文件存在但读不了（权限不足、
+ * 路径是目录等）会继续抛出，避免把「配置读不到」误报成「配置缺失」。
+ */
+export async function loadMcpServers(file: string): Promise<Record<string, unknown>> {
   let raw: string;
   try {
     raw = await readFile(file, 'utf8');
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
     return {};
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    return {};
+  } catch (error) {
+    throw new ConfigError(`MCP 配置文件 JSON 解析失败: ${file}`, { cause: error });
   }
 
-  if (typeof parsed !== 'object' || parsed === null) return {};
-  const servers = (parsed as { servers?: unknown }).servers;
-  if (typeof servers !== 'object' || servers === null) return {};
+  if (!isPlainObject(parsed)) {
+    throw new ConfigError(`MCP 配置文件顶层必须是对象: ${file}`);
+  }
 
-  return servers as McpServers;
+  const servers = parsed.servers;
+  if (servers === undefined) {
+    return {};
+  }
+  if (!isPlainObject(servers)) {
+    throw new ConfigError(`MCP 配置文件的 servers 必须是对象: ${file}`);
+  }
+
+  for (const [name, connection] of Object.entries(servers)) {
+    if (!isPlainObject(connection)) {
+      throw new ConfigError(`MCP 配置文件中 server "${name}" 的值必须是对象: ${file}`);
+    }
+  }
+
+  return servers;
 }
 ```
 
-- [ ] **Step 4: 实现 `src/mcp/hub.ts`**
+> 返回类型是 `Record<string, unknown>` 而非 `MCPAdapterConfig['servers']`：若在 loader 里就断言成 SDK 类型，断言会提前到「结构校验之后、SDK 校验之前」——正是 R4 禁止的位置。唯一的断言因此钉在 `hub.ts` 的 SDK 边界。
+
+- [x] **Step 4: 实现 `src/mcp/hub.ts`**（最终落地版本，含修复轮 1）
 
 ```ts
 import { MCPAdapter } from '@langchain/mcp-adapters';
+import type { MCPAdapterConfig } from '@langchain/mcp-adapters';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
+import { ConfigError, createLogger } from '../shared/index.js';
+import type { Logger } from '../shared/index.js';
 import { loadMcpServers } from './config.js';
 
-export class McpHub {
-  private constructor(private readonly adapter: MCPAdapter | null) {}
+/** McpHub 依赖的最小适配器面：只有工具发现与关闭两个能力，SDK 适配器天然满足。 */
+export interface McpAdapterLike {
+  listTools(): Promise<DynamicStructuredTool[]>;
+  close(): Promise<void>;
+}
 
-  static async fromConfig(file: string): Promise<McpHub> {
+function hasMessage(value: unknown): value is { message: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'message' in value &&
+    typeof value.message === 'string'
+  );
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (hasMessage(error)) return error.message;
+  return String(error);
+}
+
+/** zod v4 的 ZodError 满足 name === 'ZodError'（已在 zod@4.6.7 实测）。 */
+function isZodError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ZodError';
+}
+
+export class McpHub {
+  private closed = false;
+  private closing: Promise<void> | undefined;
+
+  protected constructor(
+    private readonly file: string,
+    private readonly adapter: McpAdapterLike | null,
+    private readonly logger: Logger,
+  ) {}
+
+  static async fromConfig(
+    file: string,
+    logger: Logger = createLogger('info', 'mcp'),
+  ): Promise<McpHub> {
     const servers = await loadMcpServers(file);
 
     if (Object.keys(servers).length === 0) {
-      return new McpHub(null);
+      return new McpHub(file, null, logger);
     }
 
-    return new McpHub(
-      new MCPAdapter({
-        servers,
-        onConnectionError: 'ignore',
-      }),
-    );
+    let adapter: McpAdapterLike;
+    try {
+      // 连接字段的权威校验在 MCPAdapter 构造器（即时 zod parse），此处只做结构校验。
+      adapter = this.createAdapter({
+        servers: servers as MCPAdapterConfig['servers'],
+        prefixToolNameWithServerName: true,
+        onConnectionError: ({ serverName, error }) => {
+          logger.warn(`MCP server "${serverName}" 连接失败，已跳过`, error);
+        },
+      });
+    } catch (error) {
+      const kind = isZodError(error)
+        ? 'MCP 配置文件校验失败'
+        : '初始化 MCP 客户端失败';
+      throw new ConfigError(`${kind}: ${file} → ${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
+
+    return new McpHub(file, adapter, logger);
+  }
+
+  /** 构造适配器的唯一可替换点：生产走 SDK 适配器，测试可注入替身覆盖失败路径。 */
+  protected static createAdapter(config: MCPAdapterConfig): McpAdapterLike {
+    return new MCPAdapter(config);
   }
 
   async tools(): Promise<DynamicStructuredTool[]> {
+    if (this.closed) {
+      throw new Error('McpHub 已关闭，不能再调用 tools()');
+    }
     if (!this.adapter) return [];
     try {
       return await this.adapter.listTools();
     } catch (error) {
-      console.warn(`[mcp] 加载工具失败: ${(error as Error).message}`);
-      return [];
+      throw new ConfigError(`MCP 工具加载失败: ${this.file} → ${errorMessage(error)}`, {
+        cause: error,
+      });
     }
   }
 
   async close(): Promise<void> {
-    await this.adapter?.close();
+    this.closed = true;
+    const pending = this.closing;
+    if (pending) return pending;
+    const attempt = (async () => {
+      await this.adapter?.close();
+    })();
+    this.closing = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      // 关闭失败必须清掉缓存，否则后续 close() 永远拿不到重试机会。
+      if (this.closing === attempt) this.closing = undefined;
+      throw error;
+    }
   }
 }
 ```
 
-- [ ] **Step 5: 实现 `src/mcp/index.ts`**
+- [x] **Step 5: 实现 `src/mcp/index.ts`**
 
 ```ts
 export * from './config.js';
 export * from './hub.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/mcp.hub.test.ts
 ```
 
-预期：PASS，3 个用例。第三个用例耗时较长（等连接失败），属正常。
+预期：PASS，**21 个用例**（简报 3 + R10 要求的 13 + 修复轮 5）。全量套件 **9 文件 / 126 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0，无子进程残留。
 
-- [ ] **Step 7: 提交**
+简报里「第三个用例耗时较长（等连接失败），属正常」的说明仍然成立；另需注意：**必须**在 `afterEach` 里无条件 `hub?.close()`，否则 stdio 子进程会泄漏并让 vitest 挂住。
+
+- [x] **Step 7: 提交**
+
+```bash
+git add src/mcp tests/mcp.hub.test.ts tests/fixtures
+git commit -m "feat: add MCP hub backed by official adapters"
+```
+
+修复轮 1 另起一次提交（不 amend）：
 
 ```bash
 git add src/mcp tests/mcp.hub.test.ts
-git commit -m "feat: add MCP hub backed by official adapters"
+git commit -m "fix: make MCP hub close retryable and clarify error reporting"
 ```
 
 ---
