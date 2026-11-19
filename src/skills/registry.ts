@@ -11,6 +11,8 @@ function isImportedSkillTool(value: unknown): value is StructuredToolInterface {
     'name' in value &&
     typeof value.name === 'string' &&
     value.name.length > 0 &&
+    'description' in value &&
+    typeof value.description === 'string' &&
     'invoke' in value &&
     typeof value.invoke === 'function' &&
     'schema' in value &&
@@ -52,7 +54,7 @@ async function importSkillTools(
   for (const [index, item] of module.tools.entries()) {
     if (!isImportedSkillTool(item)) {
       throw new SkillParseError(
-        `skill "${manifest.name}" 的 tools[${index}] 缺少可用的 name/invoke/schema: ${entry}`,
+        `skill "${manifest.name}" 的 tools[${index}] 缺少可用的 name/description/invoke/schema: ${entry}`,
       );
     }
     tools.push(item);
@@ -66,6 +68,19 @@ function renameTool(original: StructuredToolInterface, name: string): Structured
     get(target, property, receiver) {
       if (property === 'name') return name;
       return Reflect.get(target, property, receiver);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'name') {
+        throw new Error(
+          `禁止改写 skill 工具的 name（"${name}"）：会写穿并污染模块缓存中的原工具，如需改名请另包一层`,
+        );
+      }
+      return Reflect.set(target, property, value, receiver);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (property === 'name' && descriptor) return { ...descriptor, value: name };
+      return descriptor;
     },
   });
 }

@@ -230,6 +230,42 @@ describe('SkillRegistry', () => {
     await expect(registry.loadTools()).rejects.toThrowError(entry);
   });
 
+  it('tools 元素缺 description 时抛含 description 的错误', async () => {
+    const skillDir = await writeSkill('demo', 'demo');
+    const entry = join(skillDir, 'tool.ts');
+    await writeFile(
+      entry,
+      "export const tools = [{ name: 'echo', invoke: async () => 'x', schema: {} }];\n",
+    );
+
+    const registry = new SkillRegistry(await loadSkills(dir!));
+    await expect(registry.loadTools()).rejects.toThrowError(SkillParseError);
+    await expect(registry.loadTools()).rejects.toThrowError('description');
+  });
+
+  it('写 proxy.name 抛错且不污染模块缓存原对象', async () => {
+    const skillDir = await writeSkill('demo', 'demo');
+    await writeFile(join(skillDir, 'tool.ts'), ECHO_TOOL_SOURCE);
+
+    const registry = new SkillRegistry(await loadSkills(dir!));
+    const tools = await registry.loadTools();
+    expect(() => {
+      tools[0]!.name = 'hacked';
+    }).toThrowError();
+
+    const again = await registry.loadTools();
+    expect(again.map((t) => t.name)).toEqual(['demo_echo']);
+  });
+
+  it('own-property 描述符的 name 与前缀一致', async () => {
+    const skillDir = await writeSkill('demo', 'demo');
+    await writeFile(join(skillDir, 'tool.ts'), ECHO_TOOL_SOURCE);
+
+    const registry = new SkillRegistry(await loadSkills(dir!));
+    const tools = await registry.loadTools();
+    expect(Object.getOwnPropertyDescriptor(tools[0]!, 'name')?.value).toBe('demo_echo');
+  });
+
   it('entry 是名为 tool.ts 的目录时抛明确错误而非 import 裸栈', async () => {
     const skillDir = await writeSkill('demo', 'demo');
     const entry = join(skillDir, 'tool.ts');
