@@ -4220,9 +4220,32 @@ git commit -m "fix: abort underlying agent work when an A2A task is canceled"
 - Create: `src/cli.ts`, `src/serve.ts`
 - Create: `skills/hello-world/SKILL.md`, `skills/hello-world/tool.ts`
 - Create: `README.md`
-- Test: `tests/cli.test.ts`（冒烟）
+- Test: `tests/cli.test.ts`（入口冒烟，spawn 真实进程）、`tests/skills.example.test.ts`（示例 skill）
 
-- [ ] **Step 1: 写示例 skill `skills/hello-world/SKILL.md`**
+**状态：已完成**（commits `3b107e8..1619d25`，审查 Approved + 1 修复轮后复审 Approved；基线 15 文件 / 232 测试，typecheck 与 build 均 exit 0）
+
+> **实现偏离简报之处（控制器裁决 R1–R12）**
+>
+> - **R1（Important）**：示例 skill 的工具名必须与实际改名一致 —— Task 8 的规则是 `` `${manifest.name}_${original.name}` `` → 目录 `hello-world` + 工具 `echo` = **`hello-world_echo`**。**简报的 SKILL.md 写成了 `hello_echo`**（allowed-tools 与正文都错），模型会照着正文去调不存在的工具。控制器已实证带连字符的名字能通过 `createAgent`/`bindTools`。
+> - **R2（Important）**：CLI 必须处理 **SIGINT / SIGTERM / EOF** 并在**所有**退出路径 dispose（简报只有 try/finally，Ctrl+C 时 `rl.question` 的 promise 永不 settle → 进程挂住或退出时不 dispose → Task 5 的 detached 子进程存活）。
+> - **R3（Important）**：禁止 `as` 断言（简报两处 `(error as Error).message`）。
+> - **R4（Important）**：serve.ts 的 runner **直接传 `runtime`**（控制器类型探针实证 `AgentRuntime extends AgentRunner` 为 `true`，含 `signal`）。
+> - **R5（Important）**：serve 的 shutdown 必须 **await server.close**、dispose 失败记日志并以**非零码**退出、重复信号不得重复收尾。
+> - **R6（Important）**：README 必须含三处跨任务路由内容（**符号链接不解析** / **MCP 配置是 `{"servers":{}}` 对象形** / **load_skill 渐进式披露**）+ spec §12 扩展指引 + 目录结构 + 常用命令。
+> - **R7（Important）**：测试覆盖 —— 简报说「冒烟」但没给代码，必须写真测试（示例 skill 加载/工具名/invoke/promptSection 不含正文/load_skill 取正文；CLI 缺 API key → 退出码 1 且 stderr 含 `LLM_API_KEY`；serve 用 dummy key 启动 → 卡片端点 200）。spawn 的子进程必须 afterEach 无条件杀掉并等待退出；端口用探测不硬编码 4124；子进程 env 显式构造。
+> - **R12**：本任务**只创建新文件**，不改任何既有模块。
+>
+> **修复轮 1**（评审 Approved 后控制器打包修 2 条 Minor）：
+> - **A**：serve 加 `server.on('error')`，记含端口与原因的可读日志后走 `shutdown(1)`；`shutdown` 加 `if (server.listening)` 守卫跳过 close，以免 `ERR_SERVER_NOT_RUNNING` 噪音掩盖真实启动错误；`shutdown(code = 0)` 参数化。
+> - **B**：`closedAnswer` 提到 REPL 循环外，race 复用它（`closedSignal` 整个会话保持 pending，循环内反复 `.then` 会无界累积反应回调）。
+>
+> **实现者发现并经复审独立核实的关键事实**：指令前提「无 error handler 时崩溃成裸堆栈 exit 1」在本机（macOS / Node v24.19.0 / tsx）**不成立** —— 实测无 handler 时 serve 提前打印「已启动」后**静默 exit 0**。这意味着修复 A 的价值**高于**指令前提：**静默成功退出比崩溃更糟**（调用方会以为 server 起来了）。
+>
+> **另一处实测修正**：`server.closeAsync` 在本机 Node v24.19.0 上**不存在**（`http.Server.prototype` 仅 `close`/`closeAllConnections`/`closeIdleConnections`/`setTimeout`）→ serve 用回调包 promise 等待连接排空，兼容 `engines >= 22`。
+>
+> **验收核对（spec §10）**：已验证 #2（typecheck/test 全绿）、#4（load_skill 取正文）、#5（卡片端点可达）、#6（空 MCP 照常）、#7（同 thread_id 历史）。**无法验证（需真实 API key，已明确声明）：#3（REPL 模型调工具）、#5 的问答部分。**
+
+- [x] **Step 1: 写示例 skill `skills/hello-world/SKILL.md`**
 
 ```markdown
 ---
@@ -4237,7 +4260,7 @@ allowed-tools: [hello_echo, sandbox_exec, sandbox_write_file]
 再用 sandbox_exec 执行 `cat` 读取它，把结果如实转述给用户。
 ```
 
-- [ ] **Step 2: 写示例 skill `skills/hello-world/tool.ts`**
+- [x] **Step 2: 写示例 skill `skills/hello-world/tool.ts`**
 
 ```ts
 import { tool } from 'langchain';
@@ -4254,7 +4277,7 @@ export const tools = [
 
 注册表会给它改名成 `hello-world_echo`。
 
-- [ ] **Step 3: 写 `src/cli.ts`**
+- [x] **Step 3: 写 `src/cli.ts`**
 
 ```ts
 import { createInterface } from 'node:readline/promises';
@@ -4299,7 +4322,7 @@ main().catch((error: unknown) => {
 });
 ```
 
-- [ ] **Step 4: 写 `src/serve.ts`**
+- [x] **Step 4: 写 `src/serve.ts`**
 
 ```ts
 import { loadConfig, loadEnvFileIfPresent } from './config/index.js';
@@ -4353,7 +4376,7 @@ main().catch((error: unknown) => {
 });
 ```
 
-- [ ] **Step 5: 写 `README.md`**
+- [x] **Step 5: 写 `README.md`**
 
 ```markdown
 # muliuniuma
@@ -4412,15 +4435,15 @@ pnpm build
 ```
 ```
 
-- [ ] **Step 6: 跑全量验证**
+- [x] **Step 6: 跑全量验证**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typecheck && pnpm test
 ```
 
-预期：`typecheck` 退出码 0；`test` 全部 PASS，无失败用例。
+预期：`typecheck` 退出码 0；`test` 全部 PASS（**15 文件 / 232 测试**），无失败用例。`pnpm build` 亦 exit 0。
 
-- [ ] **Step 7: 手动冒烟 CLI（需要真实 API key）**
+- [x] **Step 7: 手动冒烟 CLI（需要真实 API key）**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && cp .env.example .env
@@ -4438,7 +4461,7 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && LLM_API_KE
 
 预期：输出「启动失败: 环境变量校验失败 → LLM_API_KEY: ...」并以退出码 1 结束。
 
-- [ ] **Step 8: 手动冒烟 A2A server（不需要 API key 的部分）**
+- [x] **Step 8: 手动冒烟 A2A server（不需要 API key 的部分）**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm serve
@@ -4452,7 +4475,7 @@ curl -s http://localhost:4124/.well-known/agent-card.json | head -40
 
 预期：返回含 `"name":"muliuniuma"` 的 JSON。
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add src/cli.ts src/serve.ts skills README.md
@@ -4480,13 +4503,15 @@ Task 2–13 之间无相互依赖，可并行分派给不同 subagent；Task 12 
 
 ## 附录 B: 验收清单（对应 spec §10）
 
-| # | 验收项 | 验证位置 |
-|---|---|---|
-| 1 | Node 24 下依赖安装成功（含 better-sqlite3 编译） | 已完成，`pnpm install` 通过 |
-| 2 | `pnpm typecheck` 与 `pnpm test` 全绿 | Task 14 Step 6 |
-| 3 | REPL 中模型可调用 skill 工具与沙箱工具 | Task 14 Step 7 |
-| 4 | 模型可通过 `load_skill` 取得 skill 正文 | Task 8 用例 + Task 14 Step 7 |
-| 5 | A2A 卡片可访问且能完成一次问答 | Task 13 用例 + Task 14 Step 8 |
-| 6 | MCP 配置为空时其余功能照常 | Task 9 用例 + Task 12 用例 |
-| 7 | 同 thread_id 二次提问能看到历史 | Task 12 第二个用例 |
+| # | 验收项 | 状态 | 验证位置 |
+|---|---|---|---|
+| 1 | Node 24 下依赖安装成功（含 better-sqlite3 编译） | ✅ 已验证 | `pnpm install` 通过（前序任务） |
+| 2 | `pnpm typecheck` 与 `pnpm test` 全绿 | ✅ 已验证 | **15 文件 / 232 测试**，typecheck 与 build 均 exit 0 |
+| 3 | REPL 中模型可调用 skill 工具与沙箱工具 | ⚠️ **需真实 API key，未验证** | 工具本身已测（Task 6/8/14 用例）；模型端到端调用需配好 `.env` 后手动冒烟 |
+| 4 | 模型可通过 `load_skill` 取得 skill 正文 | ✅ 已验证 | Task 8 用例 + `tests/skills.example.test.ts` |
+| 5 | A2A 卡片可访问且能完成一次问答 | 🔶 **卡片已验证；问答需真实 API key** | 卡片端点：`tests/cli.test.ts`（spawn 真实 serve + fetch）；问答：Task 13 用例（fake runner）+ 需真实 key 手动冒烟 |
+| 6 | MCP 配置为空时其余功能照常 | ✅ 已验证 | Task 9 用例 + Task 12 用例 |
+| 7 | 同 thread_id 二次提问能看到历史 | ✅ 已验证 | Task 12 用例（SQLite checkpointer 实证累积历史） |
+
+**未验证项的说明**：第 3 项与第 5 项的问答部分需要真实的 LLM API key 才能跑通模型端到端调用。本骨架的所有**非模型**路径（配置校验、skill 加载与工具调用、沙箱执行、MCP 连接、A2A 卡片与 JSON-RPC 往返、checkpointer 历史、取消中止）都已用真实依赖实测覆盖。配好 `.env` 后按 Task 14 Step 7/8 手动冒烟即可补齐这两项。
 
