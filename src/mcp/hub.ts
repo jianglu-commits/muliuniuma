@@ -5,16 +5,39 @@ import { ConfigError, createLogger } from '../shared/index.js';
 import type { Logger } from '../shared/index.js';
 import { loadMcpServers } from './config.js';
 
+/** McpHub 依赖的最小适配器面：只有工具发现与关闭两个能力，SDK 适配器天然满足。 */
+export interface McpAdapterLike {
+  listTools(): Promise<DynamicStructuredTool[]>;
+  close(): Promise<void>;
+}
+
+function hasMessage(value: unknown): value is { message: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'message' in value &&
+    typeof value.message === 'string'
+  );
+}
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (hasMessage(error)) return error.message;
+  return String(error);
+}
+
+/** zod v4 的 ZodError 满足 name === 'ZodError'（已在 zod@4.6.7 实测）。 */
+function isZodError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'ZodError';
 }
 
 export class McpHub {
   private closed = false;
+  private closing: Promise<void> | undefined;
 
-  private constructor(
+  protected constructor(
     private readonly file: string,
-    private readonly adapter: MCPAdapter | null,
+    private readonly adapter: McpAdapterLike | null,
     private readonly logger: Logger,
   ) {}
 
@@ -28,10 +51,10 @@ export class McpHub {
       return new McpHub(file, null, logger);
     }
 
-    let adapter: MCPAdapter;
+    let adapter: McpAdapterLike;
     try {
       // 连接字段的权威校验在 MCPAdapter 构造器（即时 zod parse），此处只做结构校验。
-      adapter = new MCPAdapter({
+      adapter = this.createAdapter({
         servers: servers as MCPAdapterConfig['servers'],
         prefixToolNameWithServerName: true,
         onConnectionError: ({ serverName, error }) => {
@@ -39,12 +62,20 @@ export class McpHub {
         },
       });
     } catch (error) {
-      throw new ConfigError(`MCP 配置文件校验失败: ${file} → ${errorMessage(error)}`, {
+      const kind = isZodError(error)
+        ? 'MCP 配置文件校验失败'
+        : '初始化 MCP 客户端失败';
+      throw new ConfigError(`${kind}: ${file} → ${errorMessage(error)}`, {
         cause: error,
       });
     }
 
     return new McpHub(file, adapter, logger);
+  }
+
+  /** 构造适配器的唯一可替换点：生产走 SDK 适配器，测试可注入替身覆盖失败路径。 */
+  protected static createAdapter(config: MCPAdapterConfig): McpAdapterLike {
+    return new MCPAdapter(config);
   }
 
   async tools(): Promise<DynamicStructuredTool[]> {
@@ -62,8 +93,19 @@ export class McpHub {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
     this.closed = true;
-    await this.adapter?.close();
+    const pending = this.closing;
+    if (pending) return pending;
+    const attempt = (async () => {
+      await this.adapter?.close();
+    })();
+    this.closing = attempt;
+    try {
+      await attempt;
+    } catch (error) {
+      // 关闭失败必须清掉缓存，否则后续 close() 永远拿不到重试机会。
+      if (this.closing === attempt) this.closing = undefined;
+      throw error;
+    }
   }
 }

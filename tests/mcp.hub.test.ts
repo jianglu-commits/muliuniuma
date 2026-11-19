@@ -3,11 +3,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { MCPAdapter } from '@langchain/mcp-adapters';
 import { McpHub } from '../src/mcp/index.js';
+import type { McpAdapterLike } from '../src/mcp/index.js';
 import { ConfigError } from '../src/shared/index.js';
 import type { Logger } from '../src/shared/index.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/mcp-echo-server.mjs', import.meta.url));
+
+// 编译期断言：SDK 适配器必须仍可赋给最小适配器面。
+const _mcpAdapterSatisfiesLike: MCPAdapter extends McpAdapterLike ? true : false = true;
 
 interface LogCall {
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -52,6 +57,34 @@ function brokenServer(): Record<string, unknown> {
 
 let dir = '';
 let hub: McpHub | undefined;
+let stubAdapter: McpAdapterLike | undefined;
+
+/** 注入替身适配器的 hub：只替换构造适配器这一步，其余行为与生产路径一致。 */
+class StubHub extends McpHub {
+  protected static override createAdapter(): McpAdapterLike {
+    if (!stubAdapter) throw new Error('测试未注入替身适配器');
+    return stubAdapter;
+  }
+}
+
+/** 构造期直接抛出非 zod 错误的 hub，用来区分「配置校验失败」与「初始化失败」。 */
+class ThrowingHub extends McpHub {
+  protected static override createAdapter(): McpAdapterLike {
+    throw new TypeError('SDK 内部失败，与用户配置无关');
+  }
+}
+
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
+function causeOf(value: unknown): unknown {
+  return value instanceof Error ? value.cause : undefined;
+}
+
+function nameOf(value: unknown): string {
+  return value instanceof Error ? value.name : '';
+}
 
 async function writeConfig(content: unknown): Promise<string> {
   const file = join(dir, 'mcp.json');
@@ -66,6 +99,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await hub?.close();
   hub = undefined;
+  stubAdapter = undefined;
   if (dir) {
     await rm(dir, { recursive: true, force: true });
     dir = '';
@@ -209,9 +243,109 @@ describe('McpHub', () => {
       servers: { dup: goodServer(['--duplicate-tools']) },
     });
     hub = await McpHub.fromConfig(file);
-    await expect(hub.tools()).rejects.toThrow(ConfigError);
-    await expect(hub.tools()).rejects.toThrow(file);
-    await expect(hub.tools()).rejects.toThrow('more than once');
-    await expect(hub.tools()).rejects.toThrow('Remove the duplicate on the server');
+    const error = await hub.tools().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(messageOf(error)).toContain(file);
+    expect(messageOf(error)).toContain('more than once');
+    expect(messageOf(error)).toContain('Remove the duplicate on the server');
+  });
+
+  it('并发 close：两次调用共享同一次关闭，且都在底层关闭完成后才 resolve', async () => {
+    let releaseClose: () => void = () => {};
+    let closeCalls = 0;
+    stubAdapter = {
+      listTools: async () => [],
+      close: async () => {
+        closeCalls += 1;
+        await new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        });
+      },
+    };
+    const file = await writeConfig({ servers: { good: goodServer() } });
+    const { logger } = createRecordingLogger();
+    hub = await StubHub.fromConfig(file, logger);
+
+    const first = hub.close();
+    const second = hub.close();
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(secondSettled).toBe(false);
+    expect(closeCalls).toBe(1);
+
+    releaseClose();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(closeCalls).toBe(1);
+  });
+
+  it('close 失败后可重试：第二次 close 真正再试一次并成功', async () => {
+    let closeCalls = 0;
+    stubAdapter = {
+      listTools: async () => [],
+      close: async () => {
+        closeCalls += 1;
+        if (closeCalls === 1) throw new Error('第一次关闭失败');
+      },
+    };
+    const file = await writeConfig({ servers: { good: goodServer() } });
+    const { logger } = createRecordingLogger();
+    hub = await StubHub.fromConfig(file, logger);
+
+    await expect(hub.close()).rejects.toThrow('第一次关闭失败');
+    expect(closeCalls).toBe(1);
+    await expect(hub.close()).resolves.toBeUndefined();
+    expect(closeCalls).toBe(2);
+  });
+
+  it('构造期非 zod 错误不被说成「配置文件校验失败」', async () => {
+    const file = await writeConfig({ servers: { good: goodServer() } });
+    const error = await ThrowingHub.fromConfig(file).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(messageOf(error)).toContain('初始化 MCP 客户端失败');
+    expect(messageOf(error)).not.toContain('配置文件校验失败');
+    expect(messageOf(error)).toContain(file);
+    expect(causeOf(error)).toBeInstanceOf(TypeError);
+  });
+
+  it('zod 校验错误仍报「配置文件校验失败」并保留路径与 cause', async () => {
+    const file = await writeConfig({ servers: { bad: { transport: 'stdio' } } });
+    const error = await McpHub.fromConfig(file).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(messageOf(error)).toContain('配置文件校验失败');
+    expect(messageOf(error)).toContain(file);
+    expect(nameOf(causeOf(error))).toBe('ZodError');
+  });
+
+  it('抛出带 message 的普通对象时错误消息保留该 message 而不是 [object Object]', async () => {
+    stubAdapter = {
+      listTools: async () => {
+        throw { message: '普通对象里的失败原因' };
+      },
+      close: async () => {},
+    };
+    const file = await writeConfig({ servers: { good: goodServer() } });
+    const { logger } = createRecordingLogger();
+    hub = await StubHub.fromConfig(file, logger);
+
+    const error = await hub.tools().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(messageOf(error)).toContain('普通对象里的失败原因');
+    expect(messageOf(error)).not.toContain('[object Object]');
   });
 });
