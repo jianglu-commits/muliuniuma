@@ -3046,10 +3046,51 @@ git commit -m "fix: harden A2A text extraction and trim artifact output"
 
 **Files:**
 - Create: `src/a2a/client.ts`, `src/a2a/remote-tool.ts`
-- Modify: `src/a2a/index.ts`
+- Modify: `src/a2a/index.ts`, `src/shared/errors.ts`（新增 `A2APeerError`）
+- Create: `tests/fixtures/a2a-peer-server.mjs` + `.d.mts`（真实 A2A peer 夹具）
 - Test: `tests/a2a.client.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/a2a.client.test.ts`**
+**状态：已完成**（commits `74108c8..28ca4e0`，审查 Needs fixes → 1 修复轮后复审 Approved；基线 11 文件 / 179 测试，typecheck 与 build 均 exit 0，无端口残留）
+
+> **实现偏离简报之处（控制器裁决 R1–R12，下方代码为最终落地版本）**
+>
+> 简报的配置解析、错误处理、测试覆盖三处与项目已确立的模式冲突：
+>
+> - **R1（Important）**：`readFile` 的 catch **只吞 ENOENT**；JSON 畸形 → `ConfigError` 含文件路径 +「JSON 解析失败」+ `{ cause }`；顶层非普通对象 → `ConfigError`。简报的 bare catch 会让写坏的配置静默变成「零个远端 agent」。
+> - **R2（Important）**：**不得用 `as` 断言**解析 peers 配置（简报 `JSON.parse(raw) as { peers?: PeerSpec[] }` 是 Task 4/8 定为 Important 的「放弃类型检查的断言」）。改为**结构收窄**：顶层非 null 普通对象；`peers` 缺失 → `[]`；`peers` 非数组 → `ConfigError`；每项非 null 普通对象、`name` 非空字符串（`trim()` 后非空）、`url` 非空字符串、`description` 若存在必须是字符串；不合 → `ConfigError` 含**文件路径**与**出问题的 peer 序号/名字**。落地用 `isPlainObject` / `isNonEmptyString` 两个类型谓词 + `errorCode()` 辅助函数，**零 `as` 断言**。
+> - **R3（Important）**：用项目 logger，**不用 `console.warn`**。`fromConfig(file, logger?)`，默认 `createLogger('info','a2a')`；跳过不可达 peer 的告警**必须含 peer 名**与底层错误内容（Error 走 rest 参数，由 logger 的 `renderArg` 用 `inspect` 保真输出）。
+> - **R4（Important）**：在 `src/shared/errors.ts` **新增** `A2APeerError`（code 用 `ErrorCode` 里早已预留但一直无人使用的 `'A2A_PEER_UNREACHABLE'`），消息含 peer 名与原因，保留 `{ cause }`；覆盖「peer 名不存在」与「调用远端失败」两处。**只新增一个类**，未动 `ErrorCode` 联合与既有类。
+> - **R5（Important）**：agent card 下载**必须有界超时**——它在启动路径上，一个黑洞 peer 会把整个 agent 启动拖住（简报第三个用例用的 `127.0.0.1:1` 是立即 ECONNREFUSED，测不到）。用 `DefaultAgentCardResolver({ fetchImpl })` + `AbortSignal.timeout`（**不是** `Promise.race` 竞速——竞速只是放弃等待，底层 fetch 仍挂着不释放连接）。默认 10_000 ms，可覆盖。
+> - **R6（Important）**：**简报的 3 个用例全都没测到「向可达远端 agent 提问并拿回文本」这个核心功能**，远程工具（名字、schema、invoke）也零覆盖。必须用**真实 HTTP 夹具**（`tests/fixtures/a2a-peer-server.mjs`，`node:http`）补端到端覆盖。覆盖：可达 peer、`ask()` 返回文本、**发出的消息形状**、远程工具名 `ask_<peer名>` + schema + invoke、**peer 挂住时按超时跳过且耗时有界**、peers 配置畸形（4 种）、未知 peer 名抛 `A2APeerError`。**不 mock** SDK / fetch；`afterEach` 必须无条件关闭夹具。
+> - **R7**：远程工具名 `ask_<sanitize(name)>`；**检测重名** → 抛 `ConfigError`（配置问题），信息含两个 peer 名与最终工具名；sanitize 后为空 → 报错。
+> - **R8**：发出的消息**必须显式传 `role: Role.ROLE_USER`**（`buildTextMessage` 默认是 `ROLE_AGENT`）。`contextId` 留空。
+> - **R9**：`list()` 返回**新数组**。**R10**：`PeerSpec` / `Peer` 形状保留简报。**R11**：barrel 追加两行。**R12**：显式返回类型；工具用 `StructuredToolInterface[]`。
+>
+> **控制器实测的 A2A 线协议（写夹具的依据，已写入实现指令）**：
+> - v1.0 的 JSON-RPC **方法名是 `SendMessage`**（**不是** 0.x 的 `message/send`）。
+> - 响应必须是 `{"jsonrpc":"2.0","id":<同一 id>,"result":{"message":{...}}}` —— `result` 下**直接**放 `message`/`task`，**不套** `payload`（套了会得到 `Invalid response: missing payload`；`client/index.js:5883` 检查 `response.payload`，而 `SendMessageResponse.fromJSON` 读的是 `object.task`/`object.message`，是 proto oneof 的 JSON 扁平化）。
+> - Message 的 proto-JSON 形状：`role` 是**字符串** `'ROLE_USER'`/`'ROLE_AGENT'`，`parts` 元素是 `{text, mediaType}`（**不是** `$case`/`value`）。
+> - 卡片 `supportedInterfaces[0].url` 要填**服务器自己的 base URL**。
+> - `ClientFactoryOptions` 有 `cardResolver?: AgentCardResolver`；`DefaultAgentCardResolver` 构造参数有 `fetchImpl?: typeof fetch`。
+>
+> **修复轮 1**（评审判定 Needs fixes，2 Important + 1 Minor 打包修）：
+> - **A（Important）**：`ask()` 的传输层调用原本**完全无超时**——远端接受连接后不回包，工具调用就**无限期 pending**，占住整个 agent 回合。改为 `sendMessage(params, { signal: AbortSignal.timeout(callTimeoutMs) })`，超时存在 hub 上（默认 `DEFAULT_CALL_TIMEOUT_MS = 120_000`，远端要跑一次 LLM 回合，比启动期的 10s 宽，关键是**有界**），故**工具调用路径自动受约束**。超时按 **`signal.aborted`** 判定（控制器实测：中止后以 `TimeoutError` 拒绝，**不是** `AbortError`，所以不能靠 `error.name` 判断），抛 `A2APeerError` 且 reason 含「调用超时：超过 N ms 未收到远端响应」+ peer 名。签名第三位参数改为 options 对象：`fromConfig(file, logger?, options?: { connectTimeoutMs?, callTimeoutMs? })`。
+> - **B（Important）**：挂起服务器原本是**用例体内局部变量**，只在用例最后一行关闭；断言失败时用例在服务器仍监听时退出 → **套接字与端口泄漏**（实现者自己的 M3 mutation 就是这个形态）。提到模块级 `let`，`afterEach` 无条件关闭两个夹具。
+> - **C（Minor）**：夹具 `close()` 第二次调用时 `server.close()` 回调收到 `ERR_SERVER_NOT_RUNNING` → promise reject → `afterEach` 抛错、**掩盖真实失败**。改为 `closed` 标志实现幂等（两个夹具共享 `createTrackedServer`）。
+>
+> **控制器与复审实测的补充结论**：
+> - `AbortSignal.timeout` 的定时器**是 unref 的**：进程挂着一个未触发的 `AbortSignal.timeout(120000)` 时 **0 ms 即退出**，正常调用不会让进程多挂 120 秒。
+> - 超时后**底层连接确实被释放**：abort 后 1 ms 内观察到 socket 关闭；连续 3 次超时调用后服务端存活 socket 恒为 2，**无每次调用泄漏一个 fd**。SDK 的 blocking 是**服务端语义**（transport 只发一次 fetch），客户端无轮询定时器。
+>
+> **路由到 Task 12 / Task 14**：
+> - Task 12/CLI 消费 A2A 错误时**必须把 `A2APeerError` 呈现给用户，不得静默吞掉**（否则拼错的 peer 名会被当网络抖动静默吞掉）。
+> - Task 12 装配时以 `A2AClientHub.fromConfig(...)` 的**方法调用形式**调用，并注入 `createLogger(config.logLevel, 'app').child('a2a')`，否则 R3 的可注入 logger 与 `LOG_LEVEL` 永不生效。
+>
+> **deferred 的 Minor**（最终整分支评审再定）：`A2APeerError` 一个 code 覆盖两种语义（peer 名不存在＝程序错误 vs 调用失败＝网络故障）；多 peer 串行创建无总体启动预算（`Promise.all` 可把 O(N×T) 降到 O(T)）；`url` 不做语法校验；`errorCode()`/`errorMessage()` 与 `env.ts`/`mcp/config.ts`/`skills/loader.ts` 的既有写法并存（建议后续统一收口）；`.d.mts` 遮蔽 `.mjs` 的类型；`ask()` 的 catch 把 `extractResultText` 的失败也算作「peer 不可用」；`contextId` 留空无用例钉住；超时后不尝试 `cancelTask` 取消远端任务（远端可能仍在跑那一轮 LLM）。
+
+- [x] **Step 1: 写失败的测试 `tests/a2a.client.test.ts`**
+
+下方为简报原始的 3 个用例（全部保留、断言未删改）。最终落地 **20 个用例** = 简报 3 + R6 要求的 13 + 修复轮 4。
 
 ```ts
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -3096,7 +3137,7 @@ describe('A2AClientHub', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.client.test.ts
@@ -3104,12 +3145,15 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/a2a/index.js"`。
 
-- [ ] **Step 3: 实现 `src/a2a/client.ts`**
+- [x] **Step 3: 实现 `src/a2a/client.ts`**（最终落地版本，含修复轮 1）
 
 ```ts
 import { readFile } from 'node:fs/promises';
-import { ClientFactory, type Client } from '@a2a-js/sdk/client';
 import { Role } from '@a2a-js/sdk';
+import { ClientFactory, ClientFactoryOptions, DefaultAgentCardResolver } from '@a2a-js/sdk/client';
+import type { Client } from '@a2a-js/sdk/client';
+import { A2APeerError, ConfigError, createLogger } from '../shared/index.js';
+import type { Logger } from '../shared/index.js';
 import { buildTextMessage, extractResultText } from './messages.js';
 
 export interface PeerSpec {
@@ -3124,21 +3168,120 @@ export interface Peer {
   description: string;
 }
 
-export class A2AClientHub {
-  private constructor(private readonly peers: Peer[]) {}
+export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
-  static async fromConfig(file: string): Promise<A2AClientHub> {
-    let specs: PeerSpec[] = [];
+/** 远端 agent 要跑一次 LLM 回合，比启动期的卡片下载宽，但仍必须是有界的。 */
+export const DEFAULT_CALL_TIMEOUT_MS = 120_000;
 
-    try {
-      const raw = await readFile(file, 'utf8');
-      const parsed = JSON.parse(raw) as { peers?: PeerSpec[] };
-      specs = Array.isArray(parsed.peers) ? parsed.peers : [];
-    } catch {
-      specs = [];
+export interface A2AClientHubOptions {
+  /** agent card 下载超时（启动路径）。 */
+  connectTimeoutMs?: number;
+  /** 单次远端调用超时（调用路径）。 */
+  callTimeoutMs?: number;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = error.code;
+    if (typeof code === 'string') return code;
+  }
+  return undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parsePeerSpec(entry: unknown, index: number, file: string): PeerSpec {
+  if (!isPlainObject(entry)) {
+    throw new ConfigError(`A2A peer 配置第 ${index} 项不是对象: ${file}`);
+  }
+
+  const { name, url, description } = entry;
+
+  if (!isNonEmptyString(name)) {
+    throw new ConfigError(`A2A peer 配置第 ${index} 项缺少非空的 "name": ${file}`);
+  }
+  if (!isNonEmptyString(url)) {
+    throw new ConfigError(`A2A peer "${name}" 的 "url" 必须是非空字符串: ${file}`);
+  }
+  if (description !== undefined && typeof description !== 'string') {
+    throw new ConfigError(`A2A peer "${name}" 的 "description" 必须是字符串: ${file}`);
+  }
+
+  const spec: PeerSpec = { name, url };
+  if (description !== undefined) {
+    spec.description = description;
+  }
+  return spec;
+}
+
+function parsePeerSpecs(raw: string, file: string): PeerSpec[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new ConfigError(`A2A peer 配置 JSON 解析失败: ${file}`, { cause: error });
+  }
+
+  if (!isPlainObject(parsed)) {
+    throw new ConfigError(`A2A peer 配置必须是 JSON 对象: ${file}`);
+  }
+
+  const peers = parsed.peers;
+  if (peers === undefined) {
+    return [];
+  }
+  if (!Array.isArray(peers)) {
+    throw new ConfigError(`A2A peer 配置的 "peers" 必须是数组: ${file}`);
+  }
+
+  return peers.map((entry, index) => parsePeerSpec(entry, index, file));
+}
+
+async function loadPeerSpecs(file: string): Promise<PeerSpec[]> {
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch (error) {
+    // 只有「文件不存在」可以静默降级成零个 peer，其余读取错误必须暴露。
+    if (errorCode(error) === 'ENOENT') {
+      return [];
     }
+    throw error;
+  }
+  return parsePeerSpecs(raw, file);
+}
 
-    const factory = new ClientFactory();
+/** agent card 的下载发生在启动路径上，必须有界，否则一个黑洞 peer 会拖住整个启动。 */
+function createClientFactory(connectTimeoutMs: number): ClientFactory {
+  const timedFetch: typeof fetch = (input, init) =>
+    fetch(input, { ...init, signal: AbortSignal.timeout(connectTimeoutMs) });
+  const resolver = new DefaultAgentCardResolver({ fetchImpl: timedFetch });
+  return new ClientFactory({ ...ClientFactoryOptions.default, cardResolver: resolver });
+}
+
+export class A2AClientHub {
+  private constructor(
+    private readonly peers: Peer[],
+    private readonly callTimeoutMs: number,
+  ) {}
+
+  static async fromConfig(
+    file: string,
+    logger: Logger = createLogger('info', 'a2a'),
+    options: A2AClientHubOptions = {},
+  ): Promise<A2AClientHub> {
+    const specs = await loadPeerSpecs(file);
+    const factory = createClientFactory(options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
     const peers: Peer[] = [];
 
     for (const spec of specs) {
@@ -3150,13 +3293,11 @@ export class A2AClientHub {
           description: spec.description ?? `调用远程 agent ${spec.name}`,
         });
       } catch (error) {
-        console.warn(
-          `[a2a] 跳过不可达的 peer "${spec.name}": ${(error as Error).message}`,
-        );
+        logger.warn(`跳过不可达的 peer "${spec.name}"`, error);
       }
     }
 
-    return new A2AClientHub(peers);
+    return new A2AClientHub(peers, options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS);
   }
 
   list(): Peer[] {
@@ -3166,44 +3307,86 @@ export class A2AClientHub {
   async ask(name: string, text: string): Promise<string> {
     const peer = this.peers.find((candidate) => candidate.spec.name === name);
     if (!peer) {
-      throw new Error(`未知的 A2A peer: ${name}`);
+      throw new A2APeerError(name, '未在 peers 配置中找到该 peer');
     }
 
-    const result = await peer.client.sendMessage({
-      tenant: '',
-      message: buildTextMessage({ text, role: Role.ROLE_USER }),
-      configuration: undefined,
-      metadata: undefined,
-    });
+    // 远端 agent 可能接受连接后永不回包，没有中止信号的话工具调用会无限期挂住。
+    const signal = AbortSignal.timeout(this.callTimeoutMs);
 
-    return extractResultText(result);
+    try {
+      const result = await peer.client.sendMessage(
+        {
+          tenant: '',
+          message: buildTextMessage({ text, role: Role.ROLE_USER }),
+          configuration: undefined,
+          metadata: undefined,
+        },
+        { signal },
+      );
+      return extractResultText(result);
+    } catch (error) {
+      if (signal.aborted) {
+        throw new A2APeerError(
+          name,
+          `调用超时：超过 ${this.callTimeoutMs} ms 未收到远端响应`,
+          { cause: error },
+        );
+      }
+      throw new A2APeerError(name, errorMessage(error), { cause: error });
+    }
   }
 }
 ```
 
-- [ ] **Step 4: 实现 `src/a2a/remote-tool.ts`**
+- [x] **Step 4: 实现 `src/a2a/remote-tool.ts`**（最终落地版本）
 
 ```ts
 import { tool } from 'langchain';
 import { z } from 'zod';
+import type { StructuredToolInterface } from '@langchain/core/tools';
+import { ConfigError } from '../shared/index.js';
 import type { A2AClientHub } from './client.js';
 
 function sanitizeToolName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-export function createRemoteAgentTools(hub: A2AClientHub) {
-  return hub.list().map((peer) =>
-    tool(async ({ message }) => await hub.ask(peer.spec.name, message), {
-      name: `ask_${sanitizeToolName(peer.spec.name)}`,
-      description: peer.description,
-      schema: z.object({ message: z.string().min(1) }),
-    }),
-  );
+export function createRemoteAgentTools(hub: A2AClientHub): StructuredToolInterface[] {
+  const tools: StructuredToolInterface[] = [];
+  const owners = new Map<string, string>();
+
+  for (const peer of hub.list()) {
+    const sanitized = sanitizeToolName(peer.spec.name);
+    if (sanitized.length === 0) {
+      throw new ConfigError(
+        `A2A peer "${peer.spec.name}" 的名称无法转换为合法工具名，已拒绝生成工具`,
+      );
+    }
+
+    const toolName = `ask_${sanitized}`;
+    const owner = owners.get(toolName);
+    if (owner !== undefined) {
+      // 重名工具会被模型当成同一个，后一个 peer 会被静默吞掉，必须当成配置错误暴露。
+      throw new ConfigError(
+        `A2A peer "${owner}" 与 "${peer.spec.name}" 映射到同一个工具名 "${toolName}"`,
+      );
+    }
+    owners.set(toolName, peer.spec.name);
+
+    tools.push(
+      tool(async ({ message }) => await hub.ask(peer.spec.name, message), {
+        name: toolName,
+        description: peer.description,
+        schema: z.object({ message: z.string().min(1) }),
+      }),
+    );
+  }
+
+  return tools;
 }
 ```
 
-- [ ] **Step 5: 修改 `src/a2a/index.ts`**
+- [x] **Step 5: 修改 `src/a2a/index.ts`**
 
 ```ts
 export * from './messages.js';
@@ -3212,19 +3395,28 @@ export * from './client.js';
 export * from './remote-tool.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.client.test.ts
 ```
 
-预期：PASS，3 个用例。第三个用例会等连接失败，耗时稍长。
+预期：PASS，**20 个用例**（简报 3 + R6 要求的 13 + 修复轮 4）。全量套件 **11 文件 / 179 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0，无端口残留。
 
-- [ ] **Step 7: 提交**
+夹具 `tests/fixtures/a2a-peer-server.mjs` 提供两个服务器：正常的 A2A peer（`GET /.well-known/agent-card.json` + `POST /` 回 `{"jsonrpc":"2.0","id":<同一 id>,"result":{"message":{...}}}`）与永不回包的挂起服务器（用于超时用例）。**`afterEach` 必须无条件关闭两者**，且 `close()` 必须**幂等**。
+
+- [x] **Step 7: 提交**
 
 ```bash
-git add src/a2a tests/a2a.client.test.ts
+git add src/a2a src/shared/errors.ts tests/a2a.client.test.ts tests/fixtures
 git commit -m "feat: add A2A client hub and remote agent tools"
+```
+
+修复轮 1 另起一次提交（不 amend）：
+
+```bash
+git add src/a2a tests/a2a.client.test.ts tests/fixtures
+git commit -m "fix: bound A2A peer calls with a timeout and close test fixtures reliably"
 ```
 
 ---

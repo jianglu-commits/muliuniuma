@@ -266,10 +266,10 @@ cli.ts / serve.ts
       ↓
 AgentRuntime.create(config)          ← 唯一装配点
       ├─ createChatModel(config.model)          → Promise<BaseChatModel>
-      ├─ McpHub.tools()                        ┐
-      ├─ SkillRegistry.tools() + load_skill    ├─→ 合并、按名去重 → tools[]
-      ├─ sandboxTool(sandbox)                  │
-      └─ A2AClientHub.remoteTools()            ┘
+      ├─ McpHub.tools()                           ┐
+      ├─ SkillRegistry.loadTools() + load_skill   ├─→ 合并、按名去重 → tools[]
+      ├─ createSandboxTools(sandbox)              │
+      └─ createRemoteAgentTools(hub)              ┘
       ↓
 createAgent({ model, tools, systemPrompt, checkpointer: SqliteSaver })
       ↓
