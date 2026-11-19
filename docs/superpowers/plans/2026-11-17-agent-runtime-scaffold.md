@@ -2133,7 +2133,32 @@ git commit -m "feat: add markdown skill loader with frontmatter parsing"
 - Create: `src/skills/registry.ts`, `src/skills/load-tool.ts`, `src/skills/index.ts`
 - Test: `tests/skills.registry.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/skills.registry.test.ts`**
+**状态：已完成**（commits `cc99aba..547644d`，审查 Approved + 1 修复轮后复审 Approved；基线 8 文件 / 105 测试，typecheck 与 build 均 exit 0）
+
+> **实现偏离简报之处（控制器裁决 R1–R8，下方代码为最终落地版本）**
+>
+> - **R1**：简报的 `schema: original.schema as never` 与 `input as never` 放弃类型检查，与 Task 4 已定为 Important 的同类 → **禁止 `as never` / `as unknown as`**。最终实现零断言。
+> - **R2**：简报用 `tool()` 重包装加前缀，会丢失 `StructuredTool` 的行为配置字段（`returnDirect` / `responseFormat` / `extras` / `verboseParsingErrors`）。**实测更严重**：重包装即使透传全部字段，在普通输入与 ToolCall 输入两种形态下都抛 `Tool response format is "content_and_artifact" but the output was not a two-tuple` → 改用 **Proxy 只拦 `name`**，零 mutate、行为全保留。
+> - **R3**：简报构造器静默覆盖重名 skill，且 `list()` 读去重 Map 而 `promptSection()` 读原始数组（两份数据不一致）→ 重名 **fail-fast** 抛错（含名字与两个冲突目录）；不保留原始数组字段，`promptSection()` 直接复用 `list()`，从结构上消灭不一致。
+> - **R4**：`tool.ts` 是用户代码 → 只认命名导出 `export const tools`（**去掉简报的 `default` 兜底**）、必须是数组、元素必须有可用 `name`/`description`/`invoke`/`schema`；不符抛含 skill 名、entry 路径与 `tools[index]` 下标的错误；动态 import 失败同样含名与路径并保留 `{ cause }`。
+> - **R5**：承接 Task 7 路由（`access(F_OK)` 对名为 `tool.ts` 的**目录**也成功）→ import 前用 `stat` + `isFile()` 校验。
+> - **R6**：返回类型用 `StructuredToolInterface`（`import type` 自 `@langchain/core/tools`，**该接口不由 `langchain` 顶层重导出**），与 Task 6 一致；简报的 `StructuredTool[]` 是具体类，比接口窄。
+> - **R7**：`loadTools()` 必须**幂等**，不得 mutate ES 模块缓存原对象（否则第二次调用产出 `demo_demo_echo`）→ 有调用两次的测试。
+> - **R8**：简报零覆盖前缀机制存在的唯一理由 → 补两个 skill 各有同名工具、空注册表 `promptSection() === ''`、不含 body、无 entry 跳过、`load_skill` 传未注册名抛 `SkillNotFoundError`、`list()` 多 skill、工具名恰为 `load_skill`。
+> - **简报自相矛盾**：`promptSection()` 标题文案含「读取正文」，而简报自己的断言是 `not.toContain('正文')` → 改标题为「读取完整说明」，**断言不得删改**。
+>
+> **修复轮 1**（评审 3 条 Minor 中裁定打包修 2 条）：守卫补 `description` 字符串校验（不要求非空）；Proxy 补 `set` 陷阱（只拦 `name`，抛含「为什么」与「另包一层」指引的错误，其余 `Reflect.set` 透传）与 `getOwnPropertyDescriptor` 陷阱（`name` 返回前缀值）。
+> 裁定理由：`proxy.name = 'x'` 实测会**写穿污染 ES 模块缓存原对象**，破坏 R7；而 spec §7 要求 Task 12 冲突时「加数字后缀」，若用 `.name =` 赋值实现就会静默腐蚀原工具——非假设性风险。
+>
+> **路由到 Task 12（本任务不做）**：
+> - 工具级重名检测（同 skill 内同名工具、跨 skill 前缀拼接碰撞如 `a`+`b_echo` 与 `a_b`+`echo` 都成 `a_b_echo`）。spec §7 把冲突处理放在 Task 12 合并层并带优先级排序，在 registry 里重复检测属过早抽象。
+> - **实现数字后缀时必须「另包一层」，不得对 skill 工具 proxy 做任何字段写入或 `Object.defineProperty`**：非 `name` 属性赋值经 `Reflect.set` 透传仍写穿原对象，且无 `defineProperty` 陷阱。
+>
+> **已实证的前提（供后续任务复用，勿再猜测）**：`name` 是 `{writable:true, enumerable:true, configurable:true}` 数据属性，故覆写描述符 value 不触发 Proxy 不变量违规；LangChain tools 模块 `#private` 字段计数为 **0**，经 Proxy 调方法安全；对象展开 `{...proxy}` 走 [[Get]] 拿到**前缀名**；`JSON.stringify` 原工具与 Proxy **完全相同**（`toJSON()` 返回 lc 序列化桩，本就不含 name），不是 Proxy 回归。
+
+- [x] **Step 1: 写失败的测试 `tests/skills.registry.test.ts`**
+
+下方为简报原始的 4 个用例（全部保留、断言未删改）。最终落地 **21 个用例** = 简报 4 + R1–R8 要求的 14 + 修复轮 3。
 
 ```ts
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -2224,7 +2249,7 @@ describe('createLoadSkillTool', () => {
 
 `tool.ts` 的契约：`export const tools = [...]`，每个元素是 LangChain 的 `tool()` 结果。注册表会给工具名加 `<skillName>_` 前缀，避免不同 skill 的同名工具互相覆盖。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/skills.registry.test.ts
@@ -2232,19 +2257,107 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`Failed to resolve import "../src/skills/index.js"`。
 
-- [ ] **Step 3: 实现 `src/skills/registry.ts`**
+- [x] **Step 3: 实现 `src/skills/registry.ts`**（最终落地版本，含修复轮 1）
 
 ```ts
+import { stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { tool, type StructuredTool } from 'langchain';
-import { SkillNotFoundError } from '../shared/index.js';
+import type { StructuredToolInterface } from '@langchain/core/tools';
+import { SkillNotFoundError, SkillParseError } from '../shared/index.js';
 import type { SkillManifest } from './types.js';
+
+function isImportedSkillTool(value: unknown): value is StructuredToolInterface {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'name' in value &&
+    typeof value.name === 'string' &&
+    value.name.length > 0 &&
+    'description' in value &&
+    typeof value.description === 'string' &&
+    'invoke' in value &&
+    typeof value.invoke === 'function' &&
+    'schema' in value &&
+    value.schema !== null &&
+    (typeof value.schema === 'object' || typeof value.schema === 'function')
+  );
+}
+
+async function importSkillTools(
+  manifest: SkillManifest,
+  entry: string,
+): Promise<StructuredToolInterface[]> {
+  let module: unknown;
+  try {
+    const stats = await stat(entry);
+    if (!stats.isFile()) {
+      throw new SkillParseError(`skill "${manifest.name}" 的 entry 不是普通文件: ${entry}`);
+    }
+    module = await import(pathToFileURL(entry).href);
+  } catch (error) {
+    if (error instanceof SkillParseError) throw error;
+    throw new SkillParseError(`skill "${manifest.name}" 的工具模块加载失败: ${entry}`, {
+      cause: error,
+    });
+  }
+
+  if (
+    typeof module !== 'object' ||
+    module === null ||
+    !('tools' in module) ||
+    !Array.isArray(module.tools)
+  ) {
+    throw new SkillParseError(
+      `skill "${manifest.name}" 的 tool.ts 必须命名导出数组 tools: ${entry}`,
+    );
+  }
+
+  const tools: StructuredToolInterface[] = [];
+  for (const [index, item] of module.tools.entries()) {
+    if (!isImportedSkillTool(item)) {
+      throw new SkillParseError(
+        `skill "${manifest.name}" 的 tools[${index}] 缺少可用的 name/description/invoke/schema: ${entry}`,
+      );
+    }
+    tools.push(item);
+  }
+  return tools;
+}
+
+// 用 Proxy 改名而非 invoke 重包装：双层包装会把 content_and_artifact 的 tuple 拍平，行为失真。
+function renameTool(original: StructuredToolInterface, name: string): StructuredToolInterface {
+  return new Proxy(original, {
+    get(target, property, receiver) {
+      if (property === 'name') return name;
+      return Reflect.get(target, property, receiver);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'name') {
+        throw new Error(
+          `禁止改写 skill 工具的 name（"${name}"）：会写穿并污染模块缓存中的原工具，如需改名请另包一层`,
+        );
+      }
+      return Reflect.set(target, property, value, receiver);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (property === 'name' && descriptor) return { ...descriptor, value: name };
+      return descriptor;
+    },
+  });
+}
 
 export class SkillRegistry {
   private readonly byName = new Map<string, SkillManifest>();
 
-  constructor(private readonly manifests: SkillManifest[]) {
+  constructor(manifests: SkillManifest[]) {
     for (const manifest of manifests) {
+      const existing = this.byName.get(manifest.name);
+      if (existing) {
+        throw new SkillParseError(
+          `skill 重名: "${manifest.name}"，冲突目录: ${existing.dir} 与 ${manifest.dir}`,
+        );
+      }
       this.byName.set(manifest.name, manifest);
     }
   }
@@ -2260,33 +2373,21 @@ export class SkillRegistry {
   }
 
   promptSection(): string {
-    if (this.manifests.length === 0) return '';
-    const lines = this.manifests.map(
-      (manifest) => `- ${manifest.name}: ${manifest.description}`,
-    );
-    return ['可用 skill（需要细节时用 load_skill 读取正文）:', ...lines].join('\n');
+    const manifests = this.list();
+    if (manifests.length === 0) return '';
+    const lines = manifests.map((manifest) => `- ${manifest.name}: ${manifest.description}`);
+    return ['可用 skill（需要细节时用 load_skill 读取完整说明）:', ...lines].join('\n');
   }
 
-  async loadTools(): Promise<StructuredTool[]> {
-    const loaded: StructuredTool[] = [];
+  async loadTools(): Promise<StructuredToolInterface[]> {
+    const loaded: StructuredToolInterface[] = [];
 
-    for (const manifest of this.manifests) {
+    for (const manifest of this.list()) {
       if (!manifest.entry) continue;
 
-      const module = (await import(pathToFileURL(manifest.entry).href)) as {
-        tools?: StructuredTool[];
-        default?: { tools?: StructuredTool[] };
-      };
-      const source = module.tools ?? module.default?.tools ?? [];
-
-      for (const original of source) {
-        loaded.push(
-          tool(async (input: unknown) => await original.invoke(input as never), {
-            name: `${manifest.name}_${original.name}`,
-            description: original.description ?? `${manifest.name} 提供的工具`,
-            schema: original.schema as never,
-          }),
-        );
+      const originals = await importSkillTools(manifest, manifest.entry);
+      for (const original of originals) {
+        loaded.push(renameTool(original, `${manifest.name}_${original.name}`));
       }
     }
 
@@ -2295,27 +2396,24 @@ export class SkillRegistry {
 }
 ```
 
-- [ ] **Step 4: 实现 `src/skills/load-tool.ts`**
+- [x] **Step 4: 实现 `src/skills/load-tool.ts`**（最终落地版本）
 
 ```ts
 import { tool } from 'langchain';
 import { z } from 'zod';
+import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { SkillRegistry } from './registry.js';
 
-export function createLoadSkillTool(registry: SkillRegistry) {
-  return tool(
-    async ({ name }) => registry.get(name).body,
-    {
-      name: 'load_skill',
-      description:
-        '按名称读取某个 skill 的完整说明正文。仅在需要该 skill 的具体用法时调用。',
-      schema: z.object({ name: z.string().min(1) }),
-    },
-  );
+export function createLoadSkillTool(registry: SkillRegistry): StructuredToolInterface {
+  return tool(async ({ name }) => registry.get(name).body, {
+    name: 'load_skill',
+    description: '按名称读取某个 skill 的完整说明正文。仅在需要该 skill 的具体用法时调用。',
+    schema: z.object({ name: z.string().min(1) }),
+  });
 }
 ```
 
-- [ ] **Step 5: 实现 `src/skills/index.ts`**
+- [x] **Step 5: 实现 `src/skills/index.ts`**
 
 ```ts
 export * from './types.js';
@@ -2324,21 +2422,28 @@ export * from './registry.js';
 export * from './load-tool.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/skills.registry.test.ts
 ```
 
-预期：PASS，4 个用例。
+预期：PASS，**21 个用例**（简报 4 + R1–R8 要求的 14 + 修复轮 3）。全量套件 **8 文件 / 105 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0。
 
-若 `original.schema as never` 引发行类型错误，改用 `DynamicStructuredTool` 包装（schema 直接透传，不需要断言）。
+简报原有的「若 `original.schema as never` 引发行类型错误，改用 `DynamicStructuredTool` 包装」备注**已作废**：R1 禁止该类断言，且实测重包装（含 `DynamicStructuredTool`）会破坏 `content_and_artifact` 语义，最终走 Proxy 改名。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/skills tests/skills.registry.test.ts
 git commit -m "feat: add skill registry with progressive disclosure and load_skill tool"
+```
+
+修复轮 1 另起一次提交（不 amend）：
+
+```bash
+git add src/skills/registry.ts tests/skills.registry.test.ts
+git commit -m "fix: validate skill tool description and keep renamed tool proxy isolated"
 ```
 
 ---
