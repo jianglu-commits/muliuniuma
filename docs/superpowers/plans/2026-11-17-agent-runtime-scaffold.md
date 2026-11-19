@@ -3923,7 +3923,33 @@ git commit -m "fix: reclaim MCP connections and log cleanup failures on startup 
 - Modify: `src/a2a/index.ts`
 - Test: `tests/a2a.server.test.ts`
 
-- [ ] **Step 1: 写失败的测试 `tests/a2a.server.test.ts`**
+**状态：已完成**（commits `c8eb58b..7f6fe51`，审查 Approved + 1 修复轮后复审 Approved；基线 13 文件 / 217 测试，typecheck 与 build 均 exit 0）
+
+> **实现偏离简报之处（控制器裁决 R1–R15，下方代码为最终落地版本）**
+>
+> - **R1（Important）**：**去掉** `app.use(express.json())`。SDK 的 `jsonRpcHandler` **自己** `router.use(express.json(), jsonErrorHandler)`（`server/express/index.js:3409`）且之前有 `contentTypeGuard`（:3408）；应用层再挂一层会抢在 SDK 的错误映射之前解析 body，畸形 JSON 变成**通用 400** 而不是 **JSON-RPC 错误**（SDK 自己在 REST handler 里写了同方向警告 :6090-6092）。已补「畸形 JSON → JSON-RPC 错误」的护栏测试。
+> - **R2（Important）**：首个事件必须是 `task` 或 `message`（`AgentExecutor.execute` 文档明写服务端强制、拒绝 `statusUpdate`/`artifactUpdate` 开头的流，`server/index.d.ts:130-134`）。
+> - **R3（Important）**：`threadId` 用 `requestContext.contextId`；SDK 的 contextId 派生是 `incomingMessage.contextId || task?.contextId || randomUUID()`（`server/index.js:2815`）→ **客户端传的 contextId 会被保留**，多轮续聊成立。
+> - **R5/R6/R7/R8/R9**：`DefaultRequestHandler` 构造是**位置参数**（`server/index.d.ts:312`）；`UserBuilder.noAuthentication` 是**函数**，直接传入不要调用；`AgentCardProvider` 是联合类型 `{getAgentCard():Promise<AgentCard>} | (()=>Promise<AgentCard>)`；`AGENT_CARD_PATH` **无前导斜杠** → 挂载写 `/${AGENT_CARD_PATH}`；JSON-RPC 端点是 **`POST /`**。
+> - **R12**：类名 `LangGraphAgentExecutor` 不准确（包的是 `AgentRunner` 抽象，而项目用 `langchain` 的 `createAgent`）→ 改名 **`A2AAgentExecutor`**。
+> - **R13（Important）**：`cancelTask` 发布**终态 statusUpdate**（`TASK_STATE_CANCELED = 5`），**不是** message（SDK 文档明写「publish a final canceled status event」）。
+>
+> **task-lifecycle 设计偏离（实现者提出，控制器端到端实证后接受）**：`execute` 采用**首发 `task(submitted)`、完成发 `statusUpdate(completed)`**，而非简报的纯 message 流。理由：这是满足 R11#8/R13 的**唯一可行路径**——SDK 的 `cancelTask` 要求任务已落库且总线活跃才会调 `executor.cancelTask`（`server/index.js:3212-3226`），纯 message 事件从不落库任务。符合 R2（task 首发合规），但**回复载荷由 `Message` 变为 `Task`**（文本在 `status.message`，`extractResultText` 已支持）。
+> 控制器用真实 `node:http` + 真实 SDK `Client` 实证：`r1 kind = Task`、`status.state = 3`（COMPLETED）、文本提取正确、同一 contextId 两次请求的 threadId 相同 → **多轮续聊成立**。
+>
+> **修复轮 1**（评审判定 Approved 但有 1 条 Important 需控制器裁决）：
+> - **A（Important）**：取消原本只停事件发布、**没停底层计算**（`AgentRunner` 无中止能力，真实 LLM 回合继续烧 token）。控制器裁定**引入中止能力**并实证可行（`agent.invoke` 传 `signal` 后 107ms 以 `AbortError` 拒绝）：`AgentRunner.run` 的 options 加可选 `signal?: AbortSignal`；`AgentRuntime.run` 接受并转发（**控制器明确授权跨模块改 `src/agent/runtime.ts`**，只许加 signal 的接受与转发）；executor 每任务建 `AbortController`。
+> - **B**：R2 集成用例的 `.rejects.toThrow()` 过宽 → 收紧为 `/without a result/` 并捕获 SDK 的 `unknown task` 告警。
+> - **C**：补 runner reject → `TASK_STATE_FAILED` 用例（实测客户端是 **resolve 出 FAILED Task**，非 reject）。
+> - **D**：空 contextId 兜底加一行「正常流不可达」注释。
+>
+> **实现者发现的关键 race 顺序约束**（控制器与复审**独立复现确认属实**）：`cancel()` 内**必须先 `signalCancel()` 再 `controller.abort()`**。若顺序写反，runner 在 abort 监听里**同步** reject 会抢先一个微任务赢下 `Promise.race`，`execute` 变成**抛出** AbortError → SDK 合成 **FAILED 而不是 CANCELED**。实现者加做了指令之外的第 4 处 mutation 实证；复审独立交换顺序复现变红、还原复绿。
+>
+> **评审核实的 SDK 行为（供后续复用）**：SDK 的 `_runExecutor` 对 `execute` 挂 `.catch`，rejection 时合成 `task(FAILED)+statusUpdate(FAILED)`（`server/index.js:2916-2958`）→ **executor 无需自己补 FAILED**；二次取消因任务已 CANCELED 被 SDK 幂等返回，不再调 executor；终态后迟到的 canceled 事件被忽略（:2355-2360）。
+>
+> **路由到 Task 14**：`serve.ts` 用 `createA2AServer({cardProvider, runner})`，runner 传 `AgentRuntime`（结构兼容 `AgentRunner`）；**卡片必须在 `createA2AServer` 之前就知道对外端口**（`serve.ts` 用配置的 `A2A_PORT`）；需真实 `AgentRuntime` 联调（本任务用符合契约的 fake runner）。
+
+- [x] **Step 1: 写失败的测试 `tests/a2a.server.test.ts`**
 
 ```ts
 import { createServer, type Server } from 'node:http';
@@ -3992,7 +4018,7 @@ describe('A2A HTTP server', () => {
 
 端口必须先于卡片确定：`ClientFactory` 会按卡片里 `supportedInterfaces[0].url` 建连，若卡片写的是 `:0` 或别的端口就会连错地方。因此测试先 `reservePort()` 拿一个空闲端口，再用它构造卡片。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.server.test.ts
@@ -4000,66 +4026,126 @@ export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vites
 
 预期：FAIL，`createA2AServer` 未导出。
 
-- [ ] **Step 3: 实现 `src/a2a/executor.ts`**
+- [x] **Step 3: 实现 `src/a2a/executor.ts`**
 
 ```ts
-import {
-  AgentEvent,
-  type AgentExecutor,
-  type ExecutionEventBus,
-  type RequestContext,
-} from '@a2a-js/sdk/server';
+import { TaskState } from '@a2a-js/sdk';
+import { AgentEvent } from '@a2a-js/sdk/server';
+import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
 import { buildTextMessage, extractText } from './messages.js';
 
 export interface AgentRunner {
-  run(input: string, options: { threadId: string }): Promise<{ text: string }>;
+  run(
+    input: string,
+    options: { threadId: string; signal?: AbortSignal },
+  ): Promise<{ text: string }>;
 }
 
-export class LangGraphAgentExecutor implements AgentExecutor {
+interface ActiveTask {
+  contextId: string;
+  cancel: () => void;
+}
+
+type RunOutcome = { kind: 'done'; text: string } | { kind: 'cancelled' };
+
+export class A2AAgentExecutor implements AgentExecutor {
+  private readonly activeTasks = new Map<string, ActiveTask>();
+
   constructor(private readonly runner: AgentRunner) {}
 
-  async execute(
-    requestContext: RequestContext,
-    eventBus: ExecutionEventBus,
-  ): Promise<void> {
-    const input = extractText(requestContext.userMessage);
-    const result = await this.runner.run(input, {
-      threadId: requestContext.contextId,
+  async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
+    const { taskId, contextId } = requestContext;
+    const userMessage = requestContext.userMessage;
+
+    // 先发 task 事件：取消路径要求任务已落库且事件总线仍在，纯 message 流不会持久化任务。
+    eventBus.publish(
+      AgentEvent.task({
+        id: taskId,
+        contextId,
+        status: {
+          state: TaskState.TASK_STATE_SUBMITTED,
+          message: undefined,
+          timestamp: new Date().toISOString(),
+        },
+        artifacts: [],
+        history: [],
+        metadata: undefined,
+      }),
+    );
+
+    const controller = new AbortController();
+    let signalCancel: () => void = () => {};
+    const cancelled = new Promise<void>((resolve) => {
+      signalCancel = resolve;
+    });
+    this.activeTasks.set(taskId, {
+      contextId,
+      // 必须先 resolve 再 abort：cancelled 要比 runner 的 AbortError 早一个微任务赢下 race，否则 execute 抛出会被 SDK 合成 FAILED。
+      cancel: () => {
+        signalCancel();
+        controller.abort();
+      },
     });
 
-    eventBus.publish(
-      AgentEvent.message(
-        buildTextMessage({
-          text: result.text,
-          contextId: requestContext.contextId,
-          taskId: requestContext.taskId,
+    try {
+      const outcome: RunOutcome = await Promise.race([
+        this.runner
+          .run(extractText(userMessage), { threadId: contextId, signal: controller.signal })
+          .then((result): RunOutcome => ({ kind: 'done', text: result.text })),
+        cancelled.then((): RunOutcome => ({ kind: 'cancelled' })),
+      ]);
+      if (outcome.kind === 'cancelled') {
+        return;
+      }
+      eventBus.publish(
+        AgentEvent.statusUpdate({
+          taskId,
+          contextId,
+          status: {
+            state: TaskState.TASK_STATE_COMPLETED,
+            message: buildTextMessage({ text: outcome.text, contextId, taskId }),
+            timestamp: new Date().toISOString(),
+          },
+          metadata: undefined,
         }),
-      ),
-    );
+      );
+    } finally {
+      this.activeTasks.delete(taskId);
+    }
   }
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
+    const active = this.activeTasks.get(taskId);
+    // 空串兜底在正常流不可达：正常取消时 active 必在；二次取消因任务已 CANCELED 被 SDK 幂等返回，不再调 executor。
+    const contextId = active?.contextId ?? '';
     eventBus.publish(
-      AgentEvent.message(
-        buildTextMessage({ text: `任务 ${taskId} 已取消`, taskId }),
-      ),
+      AgentEvent.statusUpdate({
+        taskId,
+        contextId,
+        status: {
+          state: TaskState.TASK_STATE_CANCELED,
+          message: buildTextMessage({ text: `任务 ${taskId} 已取消`, contextId, taskId }),
+          timestamp: new Date().toISOString(),
+        },
+        metadata: undefined,
+      }),
     );
+    active?.cancel();
   }
 }
 ```
 
-- [ ] **Step 4: 实现 `src/a2a/server.ts`**
+- [x] **Step 4: 实现 `src/a2a/server.ts`**
 
 ```ts
-import express, { type Express } from 'express';
-import { AGENT_CARD_PATH, type AgentCard } from '@a2a-js/sdk';
+import express from 'express';
+import type { Express } from 'express';
+import { AGENT_CARD_PATH } from '@a2a-js/sdk';
+import type { AgentCard } from '@a2a-js/sdk';
 import { DefaultRequestHandler, InMemoryTaskStore } from '@a2a-js/sdk/server';
-import {
-  agentCardHandler,
-  jsonRpcHandler,
-  UserBuilder,
-} from '@a2a-js/sdk/server/express';
-import { LangGraphAgentExecutor, type AgentRunner } from './executor.js';
+import { UserBuilder, agentCardHandler, jsonRpcHandler } from '@a2a-js/sdk/server/express';
+import { A2AAgentExecutor } from './executor.js';
+import type { AgentRunner } from './executor.js';
 
 export interface A2AServerOptions {
   cardProvider: () => AgentCard;
@@ -4068,29 +4154,21 @@ export interface A2AServerOptions {
 
 export function createA2AServer(options: A2AServerOptions): Express {
   const app = express();
-  app.use(express.json());
-
   const card = options.cardProvider();
 
   const requestHandler = new DefaultRequestHandler(
     card,
     new InMemoryTaskStore(),
-    new LangGraphAgentExecutor(options.runner),
+    new A2AAgentExecutor(options.runner),
   );
 
   app.use(
     `/${AGENT_CARD_PATH}`,
-    agentCardHandler({
-      agentCardProvider: { getAgentCard: async () => card },
-    }),
+    agentCardHandler({ agentCardProvider: { getAgentCard: async () => card } }),
   );
 
-  app.use(
-    jsonRpcHandler({
-      requestHandler,
-      userBuilder: UserBuilder.noAuthentication,
-    }),
-  );
+  // body 解析与畸形 JSON 的错误映射都由 jsonRpcHandler 内部完成，应用层不能再挂 express.json()。
+  app.use(jsonRpcHandler({ requestHandler, userBuilder: UserBuilder.noAuthentication }));
 
   return app;
 }
@@ -4101,7 +4179,7 @@ export function createA2AServer(options: A2AServerOptions): Express {
 - `AGENT_CARD_PATH` 的值是 `.well-known/agent-card.json`，**没有前导斜杠**，所以 express 挂载路径要写成 `/${AGENT_CARD_PATH}`。
 - `DefaultRequestHandler` 的构造期需要一张同步的 `AgentCard`，所以 `cardProvider` 是同步函数、构造时调用一次。调用方必须在调用 `createA2AServer` **之前**就知道对外端口（`serve.ts` 用配置里的 `A2A_PORT`，测试用 `reservePort()`），否则客户端会按卡片里的错误地址建连。
 
-- [ ] **Step 5: 修改 `src/a2a/index.ts`**
+- [x] **Step 5: 修改 `src/a2a/index.ts`**
 
 ```ts
 export * from './messages.js';
@@ -4112,19 +4190,26 @@ export * from './executor.js';
 export * from './server.js';
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm vitest run tests/a2a.server.test.ts
 ```
 
-预期：PASS，1 个用例。
+预期：PASS，**12 个用例**（简报 1 + R11 要求的 8 + 修复轮 3）。全量套件 **13 文件 / 217 测试**，`pnpm typecheck` 与 `pnpm build` 均 exit 0。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add src/a2a tests/a2a.server.test.ts
 git commit -m "feat: add A2A executor and express server"
+```
+
+修复轮 1 另起一次提交（不 amend）：
+
+```bash
+git add src/a2a src/agent/runtime.ts tests/a2a.server.test.ts tests/agent.runtime.test.ts
+git commit -m "fix: abort underlying agent work when an A2A task is canceled"
 ```
 
 ---
