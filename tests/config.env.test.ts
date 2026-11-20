@@ -31,6 +31,10 @@ describe('loadConfig', () => {
     expect(config.sandbox.timeoutMs).toBe(30_000);
     expect(config.a2a.port).toBe(4124);
     expect(config.logLevel).toBe('info');
+    expect(config.summary.enabled).toBe(true);
+    expect(config.summary.triggerTokens).toBe(8000);
+    expect(config.summary.keepTokens).toBe(2000);
+    expect(config.summary.trimTokens).toBe(8000);
   });
 
   it('缺少 LLM_API_KEY 时抛出 ConfigError 并指出变量名', () => {
@@ -73,6 +77,53 @@ describe('loadConfig', () => {
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).code).toBe('CONFIG_INVALID');
     expect((error as Error).message).toMatch(/SANDBOX_TIMEOUT_MS/);
+  });
+
+  it('SUMMARY_TRIGGER_TOKENS 非正数时报出变量名', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, SUMMARY_TRIGGER_TOKENS: '0' });
+    };
+
+    expect(run).toThrowError(/SUMMARY_TRIGGER_TOKENS/);
+    expect(run).toThrowError(ConfigError);
+  });
+
+  it('SUMMARY_KEEP_TOKENS 非正数时报出变量名', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, SUMMARY_KEEP_TOKENS: '0' });
+    };
+
+    expect(run).toThrowError(/SUMMARY_KEEP_TOKENS/);
+    expect(run).toThrowError(ConfigError);
+  });
+
+  it('SUMMARY_TRIM_TOKENS 非正数时报出变量名', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, SUMMARY_TRIM_TOKENS: '0' });
+    };
+
+    expect(run).toThrowError(/SUMMARY_TRIM_TOKENS/);
+    expect(run).toThrowError(ConfigError);
+  });
+
+  it('SUMMARY_ENABLED 只接受 true / false', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, SUMMARY_ENABLED: 'yes' });
+    };
+
+    expect(run).toThrowError(/SUMMARY_ENABLED/);
+    expect(run).toThrowError(ConfigError);
+  });
+
+  it('SUMMARY_ENABLED=false 时摘要功能被关闭', () => {
+    const config = loadConfig({ ...BASE, SUMMARY_ENABLED: 'false' });
+    expect(config.summary.enabled).toBe(false);
+  });
+
+  it('SUMMARY_ENABLED 不会被字符串 false 误判成开启', () => {
+    const config = loadConfig({ ...BASE, SUMMARY_ENABLED: 'false' });
+    expect(config.summary.enabled).toBe(false);
+    expect(loadConfig({ ...BASE }).summary.enabled).toBe(true);
   });
 });
 
@@ -171,6 +222,10 @@ describe('loadConfig 默认参数（读取真实 process.env）', () => {
     'A2A_PUBLIC_URL',
     'A2A_AGENT_NAME',
     'A2A_DESCRIPTION',
+    'SUMMARY_ENABLED',
+    'SUMMARY_TRIGGER_TOKENS',
+    'SUMMARY_KEEP_TOKENS',
+    'SUMMARY_TRIM_TOKENS',
     'LOG_LEVEL',
   ];
 
@@ -210,5 +265,9 @@ describe('loadConfig 默认参数（读取真实 process.env）', () => {
     expect(config.sandbox.timeoutMs).toBe(30_000);
     expect(config.a2a.port).toBe(4124);
     expect(config.logLevel).toBe('info');
+    expect(config.summary.enabled).toBe(true);
+    expect(config.summary.triggerTokens).toBe(8000);
+    expect(config.summary.keepTokens).toBe(2000);
+    expect(config.summary.trimTokens).toBe(8000);
   });
 });

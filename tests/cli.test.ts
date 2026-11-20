@@ -214,6 +214,23 @@ describe('CLI 入口冒烟', () => {
     await expectDisposed(tempDir);
   });
 
+  it('输入 /summarize 在历史为空时提示无需压缩且不触发模型调用', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'cli-summarize-'));
+    const port = await reservePort();
+    const current = spawnEntrypoint('src/cli.ts', baseEnv(tempDir, port));
+    const stderr = capture(current.stderr);
+    const stdout = capture(current.stdout);
+    await waitFor(() => stderr().includes('会话已启动'));
+    current.stdin?.write('/summarize\n');
+    await waitFor(() => stdout().includes('当前历史无需压缩'));
+    const exited = exitOf(current);
+    current.stdin?.write('/exit\n');
+    const { code, signal } = await exited;
+    expect(signal).toBeNull();
+    expect(code).toBe(0);
+    await expectDisposed(tempDir);
+  });
+
   it('REPL 多轮输入时 closedSignal 只挂载一个反应回调', async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'cli-reactions-'));
     const port = await reservePort();

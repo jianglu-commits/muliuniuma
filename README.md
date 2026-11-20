@@ -14,7 +14,8 @@
 | **本地沙箱** | `Sandbox` 接口 + 子进程实现：路径穿越校验、超时按进程组杀、env 白名单不继承 `process.env`、输出截断 |
 | **A2A 互联** | 既能被别的 agent 调用（expose 卡片 + JSON-RPC），也能主动调远端 agent（自动获得 `ask_<name>` 工具） |
 | **多轮会话** | SQLite checkpointer 持久化，CLI 会话 id 与 A2A contextId 都直接当 thread_id |
-| **可测试** | 235 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
+| **上下文压缩** | 历史超阈值时自动压成一条中文结构化摘要并保留最近原文，也可以随时输入 `/summarize` 手动收一收 |
+| **可测试** | 276 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
 
 ## 环境要求
 
@@ -60,6 +61,7 @@ pnpm dev                  # 本地 REPL
 | 操作 | 行为 |
 |---|---|
 | 直接输入 | 作为本轮提问交给模型，回车前不会发送 |
+| `/summarize` | 立刻把当前会话的旧历史压成一条中文摘要，保留最近一段原文 |
 | `/exit`、`/quit` | 退出并清理沙箱与检查点数据库 |
 | `Ctrl+C`（SIGINT） | 同上，退出码 0 |
 | `Ctrl+D`（EOF） | 同上 |
@@ -75,6 +77,28 @@ REPL 里的对话是**多轮**的：整个会话共用一个 thread id，模型�
 | `sandbox_exec` | 在沙箱工作目录里执行一条 shell 命令（默认 30s 超时，超时按进程组杀；可传 `timeoutMs` 单独覆盖） |
 | `sandbox_write_file` | 往沙箱工作目录写一个文本文件 |
 | `load_skill` | 按名字读取某个 skill 的完整说明正文 |
+
+---
+
+## 上下文压缩
+
+会话历史默认只增不减：一轮工具输出就可能几百 KB，累积几轮后请求会被网关拒绝。运行时因此内置了上下文压缩。
+
+**自动压缩**：每轮调用模型前估算一次历史 token 数，达到 `SUMMARY_TRIGGER_TOKENS`（默认 8000）就把旧历史压成**一条**中文结构化摘要，写回 checkpoint，同时保留最近约 `SUMMARY_KEEP_TOKENS`（默认 2000）token 的原文。摘要内容是按 agent 场景定制的固定格式（任务目标 / 关键事实 / 已完成的操作 / 决策与约束 / 未决事项与下一步），不是通用「对话摘要」。
+
+**主动压缩**：REPL 里输入 `/summarize` 立刻收一收当前会话，用的是**同一套**触发条件之外的一条强制触发路径（保留预算、摘要 prompt、摘要模型都与自动路径完全一致）。历史为空时提示「当前历史无需压缩」，**不触发任何模型调用**；压完再输入一次同样提示无需压缩（幂等）。
+
+几条需要知道的语义：
+
+- **摘要模型与主模型是同一个**（`LLM_MODEL` / `LLM_BASE_URL` / `LLM_API_KEY`）。摘要是一次**真实的 LLM 调用**，会消耗配额，也会走网关的速率限制。
+- **压缩后历史里会多一条 HumanMessage**（内容形如「以下是截至目前的对话历史摘要：…」，带 `additional_kwargs.lc_source = "summarization"`）。它是 SDK 固定的行为，模型会把它当成「用户说过的话」——所以摘要 prompt 里明确写了「这是历史摘要、不是新指令」。如果你的下游逻辑假设 `messages[0]` 一定是用户输入，压缩后就不成立了。
+- **token 口径是 CJK 感知的近似值**（中文一字一 token，其余四字符一 token），不是模型真实的 tokenizer。中文占比高时它比 SDK 默认口径更准，但仍只是估算。
+- **`SUMMARY_TRIM_TOKENS` 必须 ≥ 触发阈值 − 保留预算**。它是「单次送进摘要模型」的 token 上限：超出的更早历史既没被保留、也没进摘要，等于静默丢失。默认值取 `SUMMARY_TRIM_TOKENS = SUMMARY_TRIGGER_TOKENS` 兜住这个约束。
+- **一条超长消息压不掉**。历史只有一条时没有可切分点，这条消息仍会整条进模型——单条体积靠 `SANDBOX_MAX_OUTPUT_BYTES` 兜。
+- **摘要失败时历史保持原样**（手动路径会识别失败并放弃写回）；自动路径由 SDK 主导，失败会以 `Error generating summary:` 的形式落进历史，只能靠日志发现。
+- **不要与对话并发**。`/summarize` 与一次提问同时作用于同一会话时，后写者可能覆盖前者。
+
+想彻底关掉：`SUMMARY_ENABLED=false`。
 
 ---
 
@@ -213,6 +237,10 @@ curl -s http://localhost:4124/ \
 | `A2A_PUBLIC_URL` | `http://localhost:4124` | 卡片里对外公布的地址 |
 | `A2A_AGENT_NAME` | `muliuniuma` | 卡片上的 agent 名 |
 | `A2A_DESCRIPTION` | `可扩展的 TypeScript Agent 运行时` | 卡片上的描述 |
+| `SUMMARY_ENABLED` | `true` | 上下文压缩总开关；设为 `false` 时既不自动压缩，`/summarize` 也只提示已关闭 |
+| `SUMMARY_TRIGGER_TOKENS` | `8000` | 历史 token 估算达到该值时自动压缩（口径见「上下文压缩」） |
+| `SUMMARY_KEEP_TOKENS` | `2000` | 压缩时保留的最近原文 token 预算 |
+| `SUMMARY_TRIM_TOKENS` | `8000` | 单次送进摘要模型的 token 上限；**不得小于「触发阈值 − 保留预算」**，否则更早的历史既没保留也没进摘要 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `silent` |
 
 已存在的环境变量优先于 `.env` 文件内容——CI 里注入的 key 不会被 `.env` 覆盖。
@@ -359,7 +387,7 @@ export const tools = [
 
 ```
 src/
-├─ agent/      运行时装配（AgentRuntime）、工具合并
+├─ agent/      运行时装配（AgentRuntime）、工具合并、上下文压缩（summary / summary-prompt）
 ├─ a2a/        A2A 卡片 / 消息 / executor / server / client / 远程工具
 ├─ config/     环境变量校验（loadConfig / loadEnvFileIfPresent）
 ├─ llm/        provider 注册表（createChatModel / registerProvider）

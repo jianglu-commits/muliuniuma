@@ -5,6 +5,7 @@ import { createAgent } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
+import { START } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import type { AppConfig } from '../config/index.js';
 import { createChatModel } from '../llm/index.js';
@@ -18,9 +19,21 @@ import { A2AClientHub, createRemoteAgentTools } from '../a2a/index.js';
 import { createLogger } from '../shared/index.js';
 import type { Logger } from '../shared/index.js';
 import { mergeToolGroups } from './tools.js';
+import {
+  createSummaryMiddleware,
+  extractSummaryText,
+  planSummary,
+} from './summary.js';
+import type {
+  SummaryMiddleware,
+  SummaryOutcome,
+  SummaryPolicy,
+} from './summary.js';
 
 export interface AgentRuntimeDeps {
   model?: BaseChatModel;
+  /** 摘要模型：默认与主模型同一个；测试可注入替身把摘要回合与主模型回合彻底分离。 */
+  summaryModel?: BaseChatModel;
 }
 
 export interface RunResult {
@@ -71,6 +84,7 @@ export class AgentRuntime {
     private readonly checkpointer: SqliteSaver,
     private readonly prompt: string,
     private readonly logger: Logger,
+    private readonly summaryMiddleware: SummaryMiddleware | undefined,
   ) {}
 
   static async create(
@@ -119,11 +133,25 @@ export class AgentRuntime {
         .filter((section) => section.length > 0)
         .join('\n\n');
 
+      const agentLogger = appLogger.child('agent');
+      const summaryPolicy: SummaryPolicy = {
+        enabled: config.summary.enabled,
+        triggerTokens: config.summary.triggerTokens,
+        keepTokens: config.summary.keepTokens,
+        trimTokens: config.summary.trimTokens,
+      };
+      // 摘要模型与主模型同一个；SDK 会忽略 runtime.context.model，只能在建中间件时定死。
+      const summaryModel = deps.summaryModel ?? model;
+      const summaryMiddleware = summaryPolicy.enabled
+        ? createSummaryMiddleware(summaryModel, summaryPolicy, agentLogger)
+        : undefined;
+
       const agent = createAgent({
         model,
         tools,
         systemPrompt: prompt,
         checkpointer,
+        middleware: summaryMiddleware ? [summaryMiddleware.agentMiddleware] : [],
       });
 
       return new AgentRuntime(
@@ -134,7 +162,8 @@ export class AgentRuntime {
         a2aHub,
         checkpointer,
         prompt,
-        appLogger.child('agent'),
+        agentLogger,
+        summaryMiddleware,
       );
     } catch (error) {
       // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录，
@@ -165,6 +194,60 @@ export class AgentRuntime {
 
   listSkills(): SkillManifest[] {
     return this.skillRegistry.list();
+  }
+
+  /**
+   * 主动压缩当前会话的历史。
+   *
+   * 与自动路径共用同一个中间件实例与同一份保留预算，区别只是把触发条件换成强制触发。
+   * 不要与 run() 并发作用于同一 thread：后写者可能覆盖前者。
+   */
+  async summarize(options: {
+    threadId: string;
+    signal?: AbortSignal;
+    keepMessages?: number;
+  }): Promise<SummaryOutcome> {
+    const middleware = this.summaryMiddleware;
+    if (middleware === undefined) {
+      return { summarized: false, reason: 'disabled' };
+    }
+
+    const config = { configurable: { thread_id: options.threadId } };
+    // getState 的声明返回类型是 never，必须显式标注变量类型才能取出 values。
+    const snapshot: { values: { messages?: BaseMessage[] } } =
+      await this.agent.getState(config);
+    const messages = snapshot.values.messages ?? [];
+    if (messages.length === 0) {
+      return { summarized: false, reason: 'empty' };
+    }
+
+    const update = await planSummary(middleware, messages, {
+      keepMessages: options.keepMessages,
+      signal: options.signal,
+      threadId: options.threadId,
+    });
+    if (update === undefined) {
+      return { summarized: false, reason: 'not-needed' };
+    }
+
+    const summary = extractSummaryText(update);
+    if (summary === undefined) {
+      // 摘要失败时 SDK 会把错误文本当成摘要写进历史，这里不写回，历史保持原样。
+      return { summarized: false, reason: 'failed' };
+    }
+
+    // asNode 必须显式给 START：省略时 langgraph 只能按 checkpoint 的版本记录去猜节点，
+    // 猜不中就直接抛 Ambiguous update。
+    await this.agent.updateState(config, { messages: update }, START);
+
+    return {
+      summarized: true,
+      reason: 'ok',
+      beforeMessages: messages.length,
+      afterMessages: update.length - 1,
+      preservedMessages: update.length - 2,
+      summary,
+    };
   }
 
   systemPrompt(): string {

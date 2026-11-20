@@ -24,6 +24,12 @@ const EnvSchema = z.object({
   A2A_AGENT_NAME: z.string().min(1).default('muliuniuma'),
   A2A_DESCRIPTION: z.string().min(1).default('可扩展的 TypeScript Agent 运行时'),
 
+  // 用 z.enum 而不是 z.coerce.boolean()：Boolean('false') === true，字符串 'false' 会被误判成开启。
+  SUMMARY_ENABLED: z.enum(['true', 'false']).default('true'),
+  SUMMARY_TRIGGER_TOKENS: z.coerce.number().int().positive().default(8000),
+  SUMMARY_KEEP_TOKENS: z.coerce.number().int().positive().default(2000),
+  SUMMARY_TRIM_TOKENS: z.coerce.number().int().positive().default(8000),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'silent']).default('info'),
 });
 
@@ -49,6 +55,12 @@ export interface AppConfig {
     publicUrl: string;
     agentName: string;
     description: string;
+  };
+  summary: {
+    enabled: boolean;
+    triggerTokens: number;
+    keepTokens: number;
+    trimTokens: number;
   };
   logLevel: LogLevel;
 }
@@ -89,6 +101,12 @@ export function loadConfig(
       publicUrl: v.A2A_PUBLIC_URL,
       agentName: v.A2A_AGENT_NAME,
       description: v.A2A_DESCRIPTION,
+    },
+    summary: {
+      enabled: v.SUMMARY_ENABLED === 'true',
+      triggerTokens: v.SUMMARY_TRIGGER_TOKENS,
+      keepTokens: v.SUMMARY_KEEP_TOKENS,
+      trimTokens: v.SUMMARY_TRIM_TOKENS,
     },
     logLevel: v.LOG_LEVEL,
   };

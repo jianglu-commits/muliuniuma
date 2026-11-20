@@ -123,6 +123,8 @@ muliuniuma/
 │  │  └─ index.ts
 │  ├─ agent/
 │  │  ├─ tools.ts             # 工具合并：按来源优先级去重改名
+│  │  ├─ summary-prompt.ts    # 中文结构化摘要 prompt 与前缀常量
+│  │  ├─ summary.ts           # 压缩策略 / token 计数 / 中间件工厂 / 主动触发
 │  │  ├─ runtime.ts           # AgentRuntime：唯一装配点
 │  │  └─ index.ts
 │  ├─ cli.ts                   # 入口 1：本地 REPL
@@ -271,9 +273,14 @@ AgentRuntime.create(config)          ← 唯一装配点
       ├─ createSandboxTools(sandbox)              │
       └─ createRemoteAgentTools(hub)              ┘
       ↓
-createAgent({ model, tools, systemPrompt, checkpointer: SqliteSaver })
+createAgent({ model, tools, systemPrompt, checkpointer: SqliteSaver,
+              middleware: [summarizationMiddleware(...)] })
       ↓
 model ⇄ tools 循环 → 最终 messages
+      ↓
+每轮调模型前：历史 token ≥ 触发阈值 → 摘要中间件把旧历史压成一条中文摘要并写回 checkpoint
+      ↑（另一条入口）
+REPL 的 /summarize → AgentRuntime.summarize() → 同一中间件的强制触发路径 → updateState(START) 写回
 ```
 
 编排用 `langchain` v1 的 `createAgent`，已核实参数名为 `{ model, tools?, systemPrompt?, stateSchema?, checkpointer?, responseFormat? }`。

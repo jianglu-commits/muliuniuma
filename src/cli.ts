@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   // closedSignal 整个会话保持 pending，循环内反复 .then 会无界累积反应回调，只挂一次。
   const closedAnswer = closedSignal.then(() => undefined);
 
-  logger.info(`会话已启动（thread=${threadId}），输入 /exit 退出。`);
+  logger.info(`会话已启动（thread=${threadId}），输入 /exit 退出，输入 /summarize 手动压缩上下文。`);
 
   try {
     for (;;) {
@@ -56,6 +56,28 @@ async function main(): Promise<void> {
       const line = answered.trim();
       if (line.length === 0) continue;
       if (line === '/exit' || line === '/quit') break;
+
+      if (line === '/summarize') {
+        try {
+          const outcome = await runtime.summarize({ threadId });
+          if (outcome.reason === 'ok') {
+            console.log(
+              `已压缩上下文：${outcome.beforeMessages ?? 0} 条 → ${outcome.afterMessages ?? 0} 条（保留 ${outcome.preservedMessages ?? 0} 条原文）`,
+            );
+          } else if (outcome.reason === 'disabled') {
+            console.log('上下文压缩已关闭（SUMMARY_ENABLED=false）');
+          } else if (outcome.reason === 'failed') {
+            console.log('生成摘要失败，历史保持原样');
+          } else {
+            console.log('当前历史无需压缩');
+          }
+        } catch (error) {
+          logger.error(
+            `压缩上下文失败: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        continue;
+      }
 
       try {
         const result = await runtime.run(line, { threadId });
