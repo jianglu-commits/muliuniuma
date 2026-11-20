@@ -18,7 +18,7 @@ import { SUMMARY_PROMPT_MARKER } from '../src/agent/index.js';
 /** 摘要模型的固定输出：短到不会把保留预算撑破，同时能断言内容。 */
 const SUMMARY_TEXT = '## 任务目标\n- 摘要';
 
-/** 60 个中文字符，CJK 感知计数器下正好 60 token。 */
+/** 60 个中文字符 + 1 个 ASCII 数字，CJK 感知计数器下是 61 token（60 + ceil(1/4)）。 */
 function longText(marker: string): string {
   return `${marker}${'测'.repeat(59)}`;
 }
@@ -321,6 +321,7 @@ describe('AgentRuntime 上下文压缩', () => {
     expect(outcome.summarized).toBe(false);
     expect(outcome.reason).toBe('empty');
     expect(model.summaryPrompts).toHaveLength(0);
+    expect(model.mainCalls).toHaveLength(0);
   });
 
   it('总开关关闭时不装中间件且主动触发返回 disabled', async () => {
@@ -368,6 +369,7 @@ describe('AgentRuntime 上下文压缩', () => {
 
     expect(outcome.reason).toBe('ok');
     expect(summaryModel.summaryPrompts).toHaveLength(1);
+    expect(summaryModel.summaryPrompts[0]).toContain(SUMMARY_PROMPT_MARKER);
     expect(mainModel.summaryPrompts).toHaveLength(0);
   });
 
@@ -396,6 +398,44 @@ describe('AgentRuntime 上下文压缩', () => {
       (message) => message.additional_kwargs['lc_source'] === 'summarization',
     );
     expect(summarySeen).toBe(false);
+    expect(lastCall.some((message) => contentOf(message).includes('问1'))).toBe(true);
+  });
+
+  it('自动压缩时摘要失败则放弃本轮压缩，历史完整保留', async () => {
+    const mainModel = new ScriptedChatModel([
+      longText('答1'),
+      longText('答2'),
+      longText('答3'),
+    ]);
+    const summaryModel = new ThrowingChatModel();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      runtime = await AgentRuntime.create(
+        makeConfig(root!, {
+          SUMMARY_TRIGGER_TOKENS: '200',
+          SUMMARY_KEEP_TOKENS: '100',
+          SUMMARY_TRIM_TOKENS: '1000',
+        }),
+        { model: mainModel, summaryModel },
+      );
+
+      await runtime.run(longText('问1'), { threadId: 'autofail' });
+      await runtime.run(longText('问2'), { threadId: 'autofail' });
+      const third = await runtime.run(longText('问3'), { threadId: 'autofail' });
+
+      // 历史没有被替换成错误文本：第一轮原文仍在，且没有任何摘要消息。
+      expect(third.messages.some((m) => contentOf(m).includes('问1'))).toBe(true);
+      expect(
+        third.messages.some((m) => m.additional_kwargs['lc_source'] === 'summarization'),
+      ).toBe(false);
+      expect(third.text).toContain('答3');
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('摘要生成失败');
+      expect(logged).not.toContain('已压缩上下文');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('keepMessages 按条数覆盖保留预算', async () => {

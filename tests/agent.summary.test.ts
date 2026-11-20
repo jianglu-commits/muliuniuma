@@ -8,6 +8,7 @@ import {
   SUMMARY_PROMPT_MARKER,
   countMessageTokens,
   createSummaryMiddleware,
+  extractSummaryText,
   looksLikeSummaryCall,
   planSummary,
 } from '../src/agent/index.js';
@@ -23,7 +24,7 @@ const POLICY: SummaryPolicy = {
   trimTokens: 1000,
 };
 
-/** 60 个中文字符，CJK 感知计数器下正好 60 token。 */
+/** 60 个中文字符 + 1 个 ASCII 数字，CJK 感知计数器下是 61 token（60 + ceil(1/4)）。 */
 function longText(marker: string): string {
   return `${marker}${'测'.repeat(59)}`;
 }
@@ -217,5 +218,33 @@ describe('planSummary', () => {
     );
 
     expect(await planSummary(middleware, [])).toBeUndefined();
+  });
+});
+
+describe('extractSummaryText', () => {
+  function summaryMessage(body: string): HumanMessage {
+    return new HumanMessage({
+      content: `${SUMMARY_PREFIX}\n\n${body}`,
+      additional_kwargs: { lc_source: 'summarization' },
+    });
+  }
+
+  it('正常摘要剥掉前缀后返回正文', () => {
+    const update = [new RemoveMessage({ id: REMOVE_ALL_MESSAGES }), summaryMessage('## 任务目标\n- 摘要')];
+    expect(extractSummaryText(update)).toBe('## 任务目标\n- 摘要');
+  });
+
+  it('SDK 的「生成摘要出错」标记视为失败', () => {
+    const update = [summaryMessage('Error generating summary: 模拟故障')];
+    expect(extractSummaryText(update)).toBeUndefined();
+  });
+
+  it('SDK 的「历史太长无法摘要」标记视为失败', () => {
+    const update = [summaryMessage('Previous conversation was too long to summarize.')];
+    expect(extractSummaryText(update)).toBeUndefined();
+  });
+
+  it('没有摘要消息时返回 undefined', () => {
+    expect(extractSummaryText([new HumanMessage('普通消息')])).toBeUndefined();
   });
 });

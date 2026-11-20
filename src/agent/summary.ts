@@ -55,7 +55,7 @@ export interface SummaryMiddleware {
   ): Promise<BaseMessage[] | undefined>;
 }
 
-/** SDK 在摘要失败时写进摘要正文的标记；命中即视为摘要失败。 */
+/** SDK 在摘要失败时写进摘要正文的标记；命中即视为摘要失败。与 SDK 版本文案耦合，升级需复核。 */
 const SUMMARY_FAILURE_MARKERS = [
   'Error generating summary:',
   'Previous conversation was too long to summarize.',
@@ -184,12 +184,17 @@ export function createSummaryMiddleware(
     beforeModel: async (state, runtime) => {
       const before = state.messages.length;
       const update = await invoke(state, runtime);
-      if (update !== undefined) {
-        logger.info(
-          `已压缩上下文：${before} 条历史 → ${update.length - 1} 条（1 条摘要 + ${update.length - 2} 条保留）`,
-        );
+      if (update === undefined) return undefined;
+      // SDK 会把摘要模型的异常当成摘要正文返回；放行就会用 REMOVE_ALL 把整段历史
+      // 替换成错误文本。这里放弃本轮压缩：历史原样、模型照常调用，不丢数据。
+      if (extractSummaryText(update) === undefined) {
+        logger.warn('摘要生成失败，已放弃自动压缩，历史保持原样');
+        return undefined;
       }
-      return update === undefined ? undefined : { messages: update };
+      logger.info(
+        `已压缩上下文：${before} 条历史 → ${update.length - 1} 条（1 条摘要 + ${update.length - 2} 条保留）`,
+      );
+      return { messages: update };
     },
   };
 
@@ -197,7 +202,9 @@ export function createSummaryMiddleware(
     messages: BaseMessage[],
     options: PlanSummaryOptions = {},
   ): Promise<BaseMessage[] | undefined> => {
-    // context 只放 trigger 与可选 keep：放了 summaryPrompt 会命中 SDK 对默认英文 prompt 的特判分支。
+    // contextSchema.parse 会给 summaryPrompt 套上 SDK 的英文默认值，从而命中 SDK 的
+    // 「context 里是默认值就改用 userOptions」特判，我们的中文 prompt 因此生效。
+    // 这里只放 trigger 与可选 keep：keep 在 schema 里无默认值，不会覆盖我们配置的 token 预算。
     const context = contextSchema.parse({
       trigger: { messages: 1 },
       ...(options.keepMessages === undefined

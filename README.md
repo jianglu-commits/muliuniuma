@@ -53,7 +53,7 @@ pnpm dev                  # 本地 REPL
 进入 REPL：
 
 ```
-[info] cli: 会话已启动（thread=1f3c…），输入 /exit 退出。
+[info] cli: 会话已启动（thread=1f3c…），输入 /exit 退出，输入 /summarize 手动压缩上下文。
 > 帮我演示一下
 模型回答…
 ```
