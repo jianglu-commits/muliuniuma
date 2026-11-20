@@ -219,6 +219,21 @@ describe('mergeToolGroups', () => {
     expect(renamed.name).toBe('dup_1');
   });
 
+  it('defineProperty 写穿被拦下且不污染原对象', () => {
+    const original = makeTool('dup');
+    const merged = mergeToolGroups([
+      { source: 'builtin', tools: [makeTool('dup')] },
+      { source: 'mcp', tools: [original] },
+    ]);
+
+    const renamed = merged[1]!;
+    expect(() => {
+      Object.defineProperty(renamed, 'name', { value: 'hacked' });
+    }).toThrow(/name/);
+    expect(original.name).toBe('dup');
+    expect(renamed.name).toBe('dup_1');
+  });
+
   it('带 content_and_artifact 的工具改名后语义不变', async () => {
     const merged = mergeToolGroups([
       { source: 'builtin', tools: [makeTool('dup')] },

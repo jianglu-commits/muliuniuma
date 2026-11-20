@@ -4441,9 +4441,11 @@ pnpm build
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && pnpm typecheck && pnpm test
 ```
 
-预期：`typecheck` 退出码 0；`test` 全部 PASS（**15 文件 / 232 测试**），无失败用例。`pnpm build` 亦 exit 0。
+预期：`typecheck` 退出码 0；`test` 全部 PASS（**15 文件 / 235 测试**），无失败用例。`pnpm build` 亦 exit 0。
 
 - [x] **Step 7: 手动冒烟 CLI（需要真实 API key）**
+
+> **标注**：本步的 `[x]` 仅覆盖「没有 API key 时的报错分支」；**真实模型回合需配好 API key 后手动冒烟**，当前未验证。
 
 ```bash
 export PATH="/Users/jianglu/.nvm/versions/node/v24.19.0/bin:$PATH" && cp .env.example .env
@@ -4506,12 +4508,12 @@ Task 2–13 之间无相互依赖，可并行分派给不同 subagent；Task 12 
 | # | 验收项 | 状态 | 验证位置 |
 |---|---|---|---|
 | 1 | Node 24 下依赖安装成功（含 better-sqlite3 编译） | ✅ 已验证 | `pnpm install` 通过（前序任务） |
-| 2 | `pnpm typecheck` 与 `pnpm test` 全绿 | ✅ 已验证 | **15 文件 / 232 测试**，typecheck 与 build 均 exit 0 |
-| 3 | REPL 中模型可调用 skill 工具与沙箱工具 | ⚠️ **需真实 API key，未验证** | 工具本身已测（Task 6/8/14 用例）；模型端到端调用需配好 `.env` 后手动冒烟 |
-| 4 | 模型可通过 `load_skill` 取得 skill 正文 | ✅ 已验证 | Task 8 用例 + `tests/skills.example.test.ts` |
+| 2 | `pnpm typecheck` 与 `pnpm test` 全绿 | ✅ 已验证 | **15 文件 / 235 测试**，typecheck 与 build 均 exit 0 |
+| 3 | REPL 中模型可调用 skill 工具与沙箱工具 | ⚠️ **需真实 API key，未验证** | 工具本身已测（Task 6/8/14 用例）+ `tests/cli.test.ts`（REPL 启停/退出/清理，无需真实 key）；模型端到端调用需配好 `.env` 后手动冒烟 |
+| 4 | 模型可通过 `load_skill` 取得 skill 正文 | 🔶 **工具层已验证；模型端到端未验证** | 工具层已验证：Task 8 用例 + `tests/skills.example.test.ts`（`load_skill` 返回正文、skill 摘要进提示正文不进）；「模型经 `load_skill` 拿到正文」同第 3 项，需真实 API key 手动冒烟 |
 | 5 | A2A 卡片可访问且能完成一次问答 | 🔶 **卡片已验证；问答需真实 API key** | 卡片端点：`tests/cli.test.ts`（spawn 真实 serve + fetch）；问答：Task 13 用例（fake runner）+ 需真实 key 手动冒烟 |
 | 6 | MCP 配置为空时其余功能照常 | ✅ 已验证 | Task 9 用例 + Task 12 用例 |
 | 7 | 同 thread_id 二次提问能看到历史 | ✅ 已验证 | Task 12 用例（SQLite checkpointer 实证累积历史） |
 
-**未验证项的说明**：第 3 项与第 5 项的问答部分需要真实的 LLM API key 才能跑通模型端到端调用。本骨架的所有**非模型**路径（配置校验、skill 加载与工具调用、沙箱执行、MCP 连接、A2A 卡片与 JSON-RPC 往返、checkpointer 历史、取消中止）都已用真实依赖实测覆盖。配好 `.env` 后按 Task 14 Step 7/8 手动冒烟即可补齐这两项。
+**未验证项的说明**：第 3 项、第 4 项的模型端到端部分与第 5 项的问答部分需要真实的 LLM API key 才能跑通模型端到端调用（第 4 项已验证的是**工具层**行为：`load_skill` 工具返回正文、skill 摘要进提示正文不进）。本骨架的所有**非模型**路径（配置校验、skill 加载与工具调用、沙箱执行、MCP 连接、A2A 卡片与 JSON-RPC 往返、checkpointer 历史、取消中止）都已用真实依赖实测覆盖。配好 `.env` 后按 Task 14 Step 7/8 手动冒烟即可补齐这几项。
 

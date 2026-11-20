@@ -1,7 +1,7 @@
 # Agent Runtime 基础骨架设计
 
 日期：2026-11-17
-状态：已确认，待实现
+状态：已实现（设计基线 2026-11-17；实现见分支 `feature/agent-runtime-scaffold`，Task 1–14 已完成）
 
 ## 1. 目标
 
@@ -255,7 +255,7 @@ export class McpHub {
 - `Role` 枚举值为 `ROLE_USER = 1` / `ROLE_AGENT = 2`；`TaskState` 为 `TASK_STATE_*` 前缀。
 - 卡片路径常量 `AGENT_CARD_PATH` 从根入口导出，直接用它挂载，不要硬编码字符串。
 
-Server 侧：`card.ts` 依配置构造完整 `AgentCard`（含 `supportedInterfaces`、`capabilities`、`securitySchemes`、`securityRequirements`、`defaultInputModes`、`defaultOutputModes`、`skills`），`executor.ts` 实现 `AgentExecutor` 并把请求转成 `AgentRuntime.run()`，`server.ts` 用 express 依次挂 `express.json()`、`agentCardHandler`、`jsonRpcHandler`。
+Server 侧：`card.ts` 依配置构造完整 `AgentCard`（含 `supportedInterfaces`、`capabilities`、`securitySchemes`、`securityRequirements`、`defaultInputModes`、`defaultOutputModes`、`skills`），`executor.ts` 实现 `AgentExecutor` 并把请求转成 `AgentRuntime.run()`，`server.ts` 用 express 依次挂 `agentCardHandler`、`jsonRpcHandler` —— **不挂 `express.json()`**：body 解析与畸形 JSON 的错误映射都由 SDK 的 `jsonRpcHandler` 内部完成，应用层再挂一次会抢走 body 流。
 
 Client 侧：`client.ts` 用 `new ClientFactory().createFromUrl(baseUrl)`（默认自动取 `/.well-known/agent-card.json`）拿到 `Client`，调用 `client.sendMessage({ tenant, message, configuration, metadata })`，返回 `SendMessageResult = Message | Task`；peers 列表来自 `config/a2a.peers.json`。`remote-tool.ts` 把每个远端 agent 包装成本地工具（`ask_<agentName>`），于是「调用别的 agent」对编排层而言就是普通工具调用，不需要单独的编排逻辑。
 

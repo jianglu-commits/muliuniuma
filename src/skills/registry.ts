@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type { StructuredToolInterface } from '@langchain/core/tools';
-import { SkillNotFoundError, SkillParseError } from '../shared/index.js';
+import { SkillNotFoundError, SkillParseError, renameTool } from '../shared/index.js';
 import type { SkillManifest } from './types.js';
 
 function isImportedSkillTool(value: unknown): value is StructuredToolInterface {
@@ -60,29 +60,6 @@ async function importSkillTools(
     tools.push(item);
   }
   return tools;
-}
-
-// 用 Proxy 改名而非 invoke 重包装：双层包装会把 content_and_artifact 的 tuple 拍平，行为失真。
-function renameTool(original: StructuredToolInterface, name: string): StructuredToolInterface {
-  return new Proxy(original, {
-    get(target, property, receiver) {
-      if (property === 'name') return name;
-      return Reflect.get(target, property, receiver);
-    },
-    set(target, property, value, receiver) {
-      if (property === 'name') {
-        throw new Error(
-          `禁止改写 skill 工具的 name（"${name}"）：会写穿并污染模块缓存中的原工具，如需改名请另包一层`,
-        );
-      }
-      return Reflect.set(target, property, value, receiver);
-    },
-    getOwnPropertyDescriptor(target, property) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
-      if (property === 'name' && descriptor) return { ...descriptor, value: name };
-      return descriptor;
-    },
-  });
 }
 
 export class SkillRegistry {

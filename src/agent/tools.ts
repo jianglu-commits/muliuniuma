@@ -1,5 +1,5 @@
 import type { StructuredToolInterface } from '@langchain/core/tools';
-import { createLogger } from '../shared/index.js';
+import { createLogger, renameTool } from '../shared/index.js';
 import type { Logger } from '../shared/index.js';
 
 export type ToolSource = 'builtin' | 'skill' | 'mcp' | 'a2a';
@@ -16,43 +16,6 @@ const PRIORITY: Record<ToolSource, number> = {
   mcp: 2,
   a2a: 3,
 };
-
-/**
- * 用 Proxy 改名而非 invoke 重包装：重包装会把 content_and_artifact 的
- * tuple 拍平成普通内容，工具语义失真。
- *
- * 必须同时拦 get 与 getOwnPropertyDescriptor：只拦 get 时，
- * Object.getOwnPropertyDescriptor(proxy, 'name').value 仍是旧名，
- * 展开运算符与描述符读数会和 .name 打架。
- *
- * 还要拦 set：写 name 会写穿到原对象（共享的 MCP/a2a 工具实例），
- * 改名的唯一入口是这层代理。
- */
-function renameTool(original: StructuredToolInterface, name: string): StructuredToolInterface {
-  return new Proxy(original, {
-    get(target, property, receiver) {
-      if (property === 'name') return name;
-      return Reflect.get(target, property, receiver);
-    },
-    set(target, property, value, receiver) {
-      if (property === 'name') {
-        throw new Error(
-          `禁止改写工具的 name（"${name}"）：改名只能通过代理，直接写入会写穿并污染原对象`,
-        );
-      }
-      return Reflect.set(target, property, value, receiver);
-    },
-    getOwnPropertyDescriptor(target, property) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
-      if (property !== 'name' || descriptor === undefined) return descriptor;
-      // 不可配置且不可写的属性必须原样上报，否则违反 Proxy 不变量。
-      if (descriptor.configurable === false && descriptor.writable === false) {
-        return descriptor;
-      }
-      return { ...descriptor, value: name };
-    },
-  });
-}
 
 export function mergeToolGroups(
   groups: ToolGroup[],

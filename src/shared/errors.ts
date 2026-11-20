@@ -1,5 +1,6 @@
 export type ErrorCode =
   | 'CONFIG_INVALID'
+  | 'MCP_TOOL_LOAD_FAILED'
   | 'PROVIDER_NOT_REGISTERED'
   | 'SANDBOX_ESCAPE'
   | 'SANDBOX_EXEC_FAILED'
@@ -22,6 +23,12 @@ export class AppError extends Error {
 export class ConfigError extends AppError {
   constructor(message: string, options?: { cause?: unknown }) {
     super('CONFIG_INVALID', message, options);
+  }
+}
+
+export class McpToolLoadError extends AppError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super('MCP_TOOL_LOAD_FAILED', message, options);
   }
 }
 

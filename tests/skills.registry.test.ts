@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SkillRegistry, createLoadSkillTool, loadSkills } from '../src/skills/index.js';
 import { SkillNotFoundError, SkillParseError } from '../src/shared/index.js';
@@ -255,6 +256,22 @@ describe('SkillRegistry', () => {
 
     const again = await registry.loadTools();
     expect(again.map((t) => t.name)).toEqual(['demo_echo']);
+  });
+
+  it('defineProperty 写穿被拦下且不污染模块缓存原对象', async () => {
+    const skillDir = await writeSkill('demo', 'demo');
+    const entry = join(skillDir, 'tool.ts');
+    await writeFile(entry, ECHO_TOOL_SOURCE);
+
+    const registry = new SkillRegistry(await loadSkills(dir!));
+    const tools = await registry.loadTools();
+    expect(() => {
+      Object.defineProperty(tools[0]!, 'name', { value: 'hacked' });
+    }).toThrow();
+
+    // 原对象是模块缓存里的单例：代理挡住写入后，它的 name 必须仍是原名。
+    const imported = await import(pathToFileURL(entry).href);
+    expect(imported.tools[0].name).toBe('echo');
   });
 
   it('own-property 描述符的 name 与前缀一致', async () => {

@@ -4,9 +4,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { MCPAdapter } from '@langchain/mcp-adapters';
+import { MCPClientError } from '@langchain/mcp-adapters';
 import { McpHub } from '../src/mcp/index.js';
 import type { McpAdapterLike } from '../src/mcp/index.js';
-import { ConfigError } from '../src/shared/index.js';
+import { AppError, ConfigError, McpToolLoadError } from '../src/shared/index.js';
 import type { Logger } from '../src/shared/index.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/mcp-echo-server.mjs', import.meta.url));
@@ -84,6 +85,10 @@ function causeOf(value: unknown): unknown {
 
 function nameOf(value: unknown): string {
   return value instanceof Error ? value.name : '';
+}
+
+function codeOf(value: unknown): string | undefined {
+  return value instanceof AppError ? value.code : undefined;
 }
 
 async function writeConfig(content: unknown): Promise<string> {
@@ -238,7 +243,7 @@ describe('McpHub', () => {
     await expect(hub.tools()).rejects.not.toBeInstanceOf(ConfigError);
   });
 
-  it('同一 server 工具名碰撞时抛含路径与 SDK 指引的 ConfigError', async () => {
+  it('同一 server 工具名碰撞时抛含路径与 SDK 指引的 McpToolLoadError', async () => {
     const file = await writeConfig({
       servers: { dup: goodServer(['--duplicate-tools']) },
     });
@@ -247,10 +252,26 @@ describe('McpHub', () => {
       () => null,
       (e: unknown) => e,
     );
-    expect(error).toBeInstanceOf(ConfigError);
+    expect(error).toBeInstanceOf(McpToolLoadError);
     expect(messageOf(error)).toContain(file);
     expect(messageOf(error)).toContain('more than once');
     expect(messageOf(error)).toContain('Remove the duplicate on the server');
+  });
+
+  it('SDK 运行期失败按 MCPClientError 分流而不是 CONFIG_INVALID', async () => {
+    const file = await writeConfig({
+      servers: { dup: goodServer(['--duplicate-tools']) },
+    });
+    hub = await McpHub.fromConfig(file);
+
+    const error = await hub.tools().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(McpToolLoadError);
+    expect(error).not.toBeInstanceOf(ConfigError);
+    expect(codeOf(error)).toBe('MCP_TOOL_LOAD_FAILED');
+    expect(causeOf(error)).toBeInstanceOf(MCPClientError);
   });
 
   it('并发 close：两次调用共享同一次关闭，且都在底层关闭完成后才 resolve', async () => {

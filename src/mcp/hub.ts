@@ -1,7 +1,7 @@
-import { MCPAdapter } from '@langchain/mcp-adapters';
+import { MCPAdapter, MCPClientError } from '@langchain/mcp-adapters';
 import type { MCPAdapterConfig } from '@langchain/mcp-adapters';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
-import { ConfigError, createLogger } from '../shared/index.js';
+import { ConfigError, McpToolLoadError, createLogger } from '../shared/index.js';
 import type { Logger } from '../shared/index.js';
 import { loadMcpServers } from './config.js';
 
@@ -86,6 +86,15 @@ export class McpHub {
     try {
       return await this.adapter.listTools();
     } catch (error) {
+      // SDK 的运行期失败是 MCPClientError，与「配置文件写错」不是一回事，不能一律报 CONFIG_INVALID。
+      if (error instanceof MCPClientError) {
+        const server = error.serverName;
+        const scope = server === undefined ? '' : `（server "${server}"）`;
+        throw new McpToolLoadError(
+          `MCP 工具加载失败${scope}: ${this.file} → ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
       throw new ConfigError(`MCP 工具加载失败: ${this.file} → ${errorMessage(error)}`, {
         cause: error,
       });

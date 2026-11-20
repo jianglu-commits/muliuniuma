@@ -70,6 +70,7 @@ export class AgentRuntime {
     private readonly a2aHub: A2AClientHub,
     private readonly checkpointer: SqliteSaver,
     private readonly prompt: string,
+    private readonly logger: Logger,
   ) {}
 
   static async create(
@@ -133,6 +134,7 @@ export class AgentRuntime {
         a2aHub,
         checkpointer,
         prompt,
+        appLogger.child('agent'),
       );
     } catch (error) {
       // 启动失败也要回收已建资源，否则每次失败都在 sandbox 根目录下留一个孤儿目录，
@@ -189,24 +191,30 @@ export class AgentRuntime {
   /**
    * 三个资源都要关闭：其中一个失败不能跳过其余的；
    * 抛出的是第一个失败而不是最后一个，否则原始故障原因会被后续异常顶替。
+   * 第一个失败之外的失败只记 warn，否则会被静默吞掉。
    */
   private async closeResources(): Promise<void> {
     let failed = false;
     let firstError: unknown;
-    const closeOne = async (close: () => Promise<void> | void): Promise<void> => {
+    const closeOne = async (
+      label: string,
+      close: () => Promise<void> | void,
+    ): Promise<void> => {
       try {
         await close();
       } catch (error) {
         if (!failed) {
           failed = true;
           firstError = error;
+        } else {
+          this.logger.warn(`${label}清理失败，已忽略`, error);
         }
       }
     };
 
-    await closeOne(() => this.mcpHub.close());
-    await closeOne(() => this.sandbox.dispose());
-    await closeOne(() => {
+    await closeOne('MCP 连接', () => this.mcpHub.close());
+    await closeOne('沙箱', () => this.sandbox.dispose());
+    await closeOne('检查点数据库', () => {
       this.checkpointer.db.close();
     });
 

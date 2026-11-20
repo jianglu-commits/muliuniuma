@@ -97,8 +97,9 @@ export function loadConfig(
 /**
  * 加载 .env 文件（若存在）。已存在的环境变量优先，不会被文件内容覆盖。
  *
- * 只有「文件不存在」（ENOENT）会被静默忽略；文件存在但读不了（权限不足、
- * 路径是目录、路径类型非法等）会继续抛出，避免把「配置读不到」误报成「配置缺失」。
+ * 实测（macOS + Node v24.19.0）：process.loadEnvFile 对「文件不存在」和
+ * 「文件存在但权限不足（chmod 000）」抛的都是 ENOENT，因此权限不足会被当成
+ * 文件不存在静默跳过；路径是目录时抛 ERR_INVALID_ARG_TYPE（非 ENOENT），会继续抛出。
  */
 export function loadEnvFileIfPresent(file = '.env'): void {
   try {

@@ -6,8 +6,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * 只有「文件不存在」（ENOENT）会被静默忽略；文件存在但读不了（权限不足、
- * 路径是目录等）会继续抛出，避免把「配置读不到」误报成「配置缺失」。
+ * 实测（macOS + Node v24.19.0）：fs/promises 的 readFile 对权限不足的文件抛
+ * EACCES（非 ENOENT），会继续抛出；路径是目录时抛 EISDIR，也会继续抛出。
+ * 只有「文件不存在」（ENOENT）才被静默忽略。
  */
 export async function loadMcpServers(file: string): Promise<Record<string, unknown>> {
   let raw: string;
