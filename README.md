@@ -1,82 +1,230 @@
 # muliuniuma
 
-可扩展的 TypeScript Agent 运行时骨架：LLM、MCP、Skill、沙箱、A2A。
+可扩展的 TypeScript Agent 运行时骨架：**LLM 接入、MCP 工具、Skill 渐进式披露、本地执行沙箱、A2A 互联**，五块能力装在一个可运行的进程里。
+
+它不是 demo 集合——每个模块都有明确的扩展点与真实测试；也不是框架——它刻意保持薄，让你能在任意一层替换实现而不动其它层。
+
+## 特性
+
+| 能力 | 说明 |
+|---|---|
+| **多 Provider LLM** | `registerProvider` 注册表，默认支持任意 OpenAI 兼容网关（DashScope / DeepSeek / vLLM …），换厂商只加一行 |
+| **MCP 工具** | 读 `config/mcp.servers.json` 连接 MCP server，工具自动带 server 名前缀；单个 server 连不上只跳过它，不拖垮启动 |
+| **Skill 渐进式披露** | 启动只把 skill 的 name/description 注入提示，模型按需用 `load_skill` 拉正文，提示词保持精简 |
+| **本地沙箱** | `Sandbox` 接口 + 子进程实现：路径穿越校验、超时按进程组杀、env 白名单不继承 `process.env`、输出截断 |
+| **A2A 互联** | 既能被别的 agent 调用（expose 卡片 + JSON-RPC），也能主动调远端 agent（自动获得 `ask_<name>` 工具） |
+| **多轮会话** | SQLite checkpointer 持久化，CLI 会话 id 与 A2A contextId 都直接当 thread_id |
+| **可测试** | 235 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
 
 ## 环境要求
 
-Node >= 22（推荐 24）。仓库带 `.nvmrc`，执行 `nvm use` 即可。`pnpm dev` / `pnpm serve`
-会先跑 `scripts/check-node.ts` 断言版本，过低时直接报错退出。
+| 项 | 要求 |
+|---|---|
+| Node | **>= 22.12**（仓库带 `.nvmrc` 指向 24）。`pnpm dev` / `pnpm serve` 会先跑 `scripts/check-node.ts` 断言版本，过低直接报错退出 |
+| 包管理器 | pnpm |
+| 原生依赖 | `better-sqlite3`（SQLite checkpointer），需本机编译工具链 |
+
+```bash
+nvm use        # 读取仓库根目录的 .nvmrc
+```
 
 ## 快速开始
 
 ```bash
 pnpm install
-cp .env.example .env   # 填入 LLM_API_KEY（以及按需调整 LLM_BASE_URL / LLM_MODEL）
-pnpm dev               # 本地 REPL
-pnpm serve             # A2A HTTP server，默认 http://localhost:4124
+cp .env.example .env      # 填入 LLM_API_KEY（以及按需改 LLM_BASE_URL / LLM_MODEL）
+pnpm dev                  # 本地 REPL
 ```
 
-所有环境变量经 zod schema 校验，缺失或非法时**在启动阶段就报明确错误**（指出变量名与期望
-格式），不在运行中途炸。`LLM_API_KEY` 缺失时 `dev` 与 `serve` 都拒绝启动，并提示复制
-`.env.example` 为 `.env` 填入。已存在的环境变量优先于 `.env` 文件内容。
-
-REPL 中输入 `/exit` 或 `/quit` 退出；`Ctrl+C`（SIGINT）、`Ctrl+D`（EOF）也都会清理沙箱与
-检查点数据库后干净退出。
-
-## 目录结构
+`.env` 里的变量会在启动时被 zod 校验，**缺失或非法时在启动阶段就报错**并指出变量名与期望格式，不会在跑到一半时炸：
 
 ```
-src/
-├─ agent/      运行时装配（AgentRuntime）、工具合并
-├─ a2a/        A2A 卡片、消息、executor、server、client、远程工具
-├─ config/     环境变量校验（loadConfig / loadEnvFileIfPresent）
-├─ llm/        provider 注册表（createChatModel / registerProvider）
-├─ mcp/        MCP 配置读取与连接（McpHub）
-├─ sandbox/    沙箱接口与本地实现（LocalProcessSandbox）
-├─ skills/     Skill 加载器、注册表、load_skill 工具
-├─ tools/      内置工具（sandbox_exec / sandbox_write_file）
-├─ cli.ts      入口 1：本地 REPL
-└─ serve.ts    入口 2：A2A HTTP server
-skills/        用户 skill 目录（含 hello-world 示例）
-config/        mcp.servers.json / a2a.peers.json
-scripts/       check-node.ts（Node 版本断言）
-tests/         vitest 用例
+启动失败: 环境变量校验失败 → LLM_API_KEY: Too small: expected string to have >=1 characters
+请复制 .env.example 为 .env 并填入 LLM_API_KEY 等必需变量。
 ```
 
-跨模块导入只走对方的 `index.ts`（barrel），以保住模块边界。
+（上面是 `.env` 已复制、只有 `LLM_API_KEY` 还空着时的输出。若 `.env` 整个缺失，会一次列出所有缺失变量。）
 
-## Skill 与渐进式披露
+---
 
-在 `skills/<name>/` 放一个 `SKILL.md`（frontmatter 含 `name` / `description`，可选
-`allowed-tools`），可选再放 `tool.ts`（命名导出数组 `tools`，元素是 LangChain `tool()` 的
-结果）。新增 skill **无需改代码、无需重新构建**。
+## 命令行使用（`pnpm dev`）
 
-启动时只把每个 skill 的 **name 与 description** 注入系统提示（渐进式披露），**不注入正文**。
-模型需要某个 skill 的具体用法时，再调用内置的 `load_skill` 工具按名称拉取完整正文。这样
-系统提示保持精简，skill 细节按需加载。
+进入 REPL：
 
-`tool.ts` 里的工具会被注册表改名为 `<skill-name>_<原工具名>`。例如 `hello-world` 示例的
-`echo` 工具，实际注册名是 **`hello-world_echo`**。`SKILL.md` 的正文与 `allowed-tools` 都应
-引用这个真实名字（示例已如此）。注意：`allowed-tools` 目前是**声明性**字段，首版不强制执行
-工具过滤。
+```
+[info] cli: 会话已启动（thread=1f3c…），输入 /exit 退出。
+> 帮我演示一下
+模型回答…
+```
+
+| 操作 | 行为 |
+|---|---|
+| 直接输入 | 作为本轮提问交给模型，回车前不会发送 |
+| `/exit`、`/quit` | 退出并清理沙箱与检查点数据库 |
+| `Ctrl+C`（SIGINT） | 同上，退出码 0 |
+| `Ctrl+D`（EOF） | 同上 |
+
+REPL 里的对话是**多轮**的：整个会话共用一个 thread id，模型能看到前面的上下文。
+
+历史落在 `CHECKPOINT_DB` 指向的 SQLite 文件里。注意 CLI **每次启动会生成新的随机 thread id**，所以重启后不会自动接上上一次的对话——历史仍在库里，但当前 CLI 没有暴露「指定 thread id 续聊」的入口（A2A 侧则由客户端自带的 `contextId` 决定）。
+
+内置工具随时可用：
+
+| 工具 | 作用 |
+|---|---|
+| `sandbox_exec` | 在沙箱工作目录里执行一条 shell 命令（默认 30s 超时，超时按进程组杀；可传 `timeoutMs` 单独覆盖） |
+| `sandbox_write_file` | 往沙箱工作目录写一个文本文件 |
+| `load_skill` | 按名字读取某个 skill 的完整说明正文 |
+
+---
+
+## A2A 服务端（`pnpm serve`）
+
+启动后本进程就变成一个可被其它 agent 调用的 A2A 端点：
+
+```
+[info] serve: A2A server 已启动: http://localhost:4124
+```
+
+### 卡片
+
+A2A 客户端靠卡片发现能力：
+
+```bash
+curl -s http://localhost:4124/.well-known/agent-card.json
+```
+
+```json
+{
+  "name": "muliuniuma",
+  "description": "可扩展的 TypeScript Agent 运行时",
+  "version": "0.1.0",
+  "supportedInterfaces": [
+    {
+      "url": "http://localhost:4124",
+      "protocolBinding": "JSONRPC",
+      "tenant": "",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extensions": [],
+    "extendedAgentCard": false
+  },
+  "securitySchemes": {},
+  "securityRequirements": [],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "hello-world",
+      "name": "hello-world",
+      "description": "演示 skill：回显用户输入，并演示读取沙箱文件",
+      "tags": [],
+      "examples": [],
+      "inputModes": ["text/plain"],
+      "outputModes": ["text/plain"],
+      "securityRequirements": []
+    }
+  ],
+  "signatures": []
+}
+```
+
+> `supportedInterfaces[0].url` 是**客户端实际建连的地址**，必须是对外可达的 URL。本地开发用 `A2A_PUBLIC_URL` 指向 `http://localhost:4124`；部署到别处时改成对外地址，否则客户端会连到错误的地址。
+> `provider` 字段默认不出现（未配置）；要填就在 `buildAgentCard` 的 `provider` 选项里给。
+
+### 手工发起一次问答
+
+A2A v1.0 的 JSON-RPC 端点是 `POST /`，**必须带 `A2A-Version: 1.0` 头**——缺省会按 v0.3 处理并被拒：
+
+```bash
+curl -s http://localhost:4124/ \
+  -H 'content-type: application/json' \
+  -H 'A2A-Version: 1.0' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "messageId": "manual-1",
+        "role": "ROLE_USER",
+        "parts": [{ "text": "你好", "mediaType": "text/plain" }]
+      },
+      "configuration": {}
+    }
+  }'
+```
+
+响应形状：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "task": {
+      "id": "0e24af1e-…",
+      "contextId": "31ec1f63-…",
+      "status": {
+        "state": "TASK_STATE_COMPLETED",
+        "message": {
+          "role": "ROLE_AGENT",
+          "parts": [{ "text": "你好：你好", "mediaType": "text/plain" }]
+        },
+        "timestamp": "2026-11-20T01:21:28.094Z"
+      },
+      "history": [ … ]
+    }
+  }
+}
+```
+
+模型的回答在 `result.task.status.message.parts[0].text`。
+
+### 多轮
+
+客户端只要在后续请求里带**同一个 `contextId`**，本地 agent 就会沿用同一个 thread 继续上下文（`thread_id` = A2A 的 contextId）。
+
+---
 
 ## 配置
 
-### MCP（`config/mcp.servers.json`）
+### 环境变量（`.env`）
 
-规范形状是 SDK 的**对象形** `{"servers": {}}`，**不是数组**。空配置即「未声明任何 server」，
-此时 MCP 静默跳过，其余功能照常工作：
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `LLM_PROVIDER` | — | provider id。已注册：`openai`、`openai-compatible` |
+| `LLM_MODEL` | — | 模型名，如 `gpt-4o-mini` |
+| `LLM_BASE_URL` | — | API 基址，OpenAI 兼容网关填自己的（如 `https://dashscope.aliyuncs.com/compatible-mode/v1`） |
+| `LLM_API_KEY` | — | API key，**必填** |
+| `LLM_TEMPERATURE` | `0` | 采样温度 |
+| `SANDBOX_ROOT` | `.sandbox` | 沙箱根目录 |
+| `SANDBOX_TIMEOUT_MS` | `30000` | 单条命令超时 |
+| `SANDBOX_MAX_OUTPUT_BYTES` | `262144` | 单流输出上限（stdout / stderr 各自封顶） |
+| `CHECKPOINT_DB` | `.data/checkpoints.sqlite` | SQLite checkpointer 路径 |
+| `SKILLS_DIR` | `skills` | skill 目录 |
+| `MCP_CONFIG` | `config/mcp.servers.json` | MCP server 声明 |
+| `A2A_PEERS` | `config/a2a.peers.json` | 可主动调用的远端 agent |
+| `A2A_PORT` | `4124` | A2A 服务端口 |
+| `A2A_PUBLIC_URL` | `http://localhost:4124` | 卡片里对外公布的地址 |
+| `A2A_AGENT_NAME` | `muliuniuma` | 卡片上的 agent 名 |
+| `A2A_DESCRIPTION` | `可扩展的 TypeScript Agent 运行时` | 卡片上的描述 |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `silent` |
 
-```json
-{ "servers": {} }
-```
+已存在的环境变量优先于 `.env` 文件内容——CI 里注入的 key 不会被 `.env` 覆盖。
 
-声明 server 时，`servers` 的每个键是 server 名、值是一个连接对象（stdio 示例）：
+### MCP server（`config/mcp.servers.json`）
+
+规范形状是 SDK 的**对象形**，**不是数组**：
 
 ```json
 {
   "servers": {
-    "example": {
+    "filesystem": {
       "transport": "stdio",
       "command": "node",
       "args": ["./some-mcp-server.mjs"],
@@ -86,55 +234,191 @@ tests/         vitest 用例
 }
 ```
 
-工具名会带上 server 名前缀。单个 server 连接失败会被跳过并告警，不会拖垮整个 agent。
+- 空配置 `{"servers": {}}` 即「未声明任何 server」，MCP 静默跳过，其余功能照常工作。
+- 工具名会自动带 server 名前缀：`filesystem` 的 `read_file` → `filesystem_read_file`。
+- 单个 server 连接失败会被**跳过并告警**（stderr 上是一条 `warn` 级日志，含 server 名与错误详情），不影响其余 server，也不阻塞启动。
 
-### A2A peers（`config/a2a.peers.json`）
-
-声明可主动调用的远端 agent，每个 peer 自动获得一个 `ask_<name>` 工具：
+### A2A peer（`config/a2a.peers.json`）
 
 ```json
 {
   "peers": [
-    { "name": "remote-agent", "url": "http://localhost:5000", "description": "远端协作 agent" }
+    {
+      "name": "remote-agent",
+      "url": "http://localhost:5000",
+      "description": "远端协作 agent"
+    }
   ]
 }
 ```
 
-空配置为 `{"peers": []}`。启动时不可达的 peer 会被跳过并告警；调用远端失败或超时会抛出
-`A2APeerError` 并**呈现给模型/用户，不会被静默吞掉**。
+每个 peer 自动给模型带来一个 `ask_remote-agent` 工具，参数 `{ "message": "…" }`，返回远端的文本回答。
 
-### 环境变量
+- 空配置 `{"peers": []}` 即「没有远端 agent」。
+- 启动时不可达的 peer 会被跳过并告警；调用远端失败或超时（默认 120s）会抛出并**呈现给模型/用户，不会被静默吞掉**。
+- 下载 peer 的 agent card 有 10s 超时，一个指向黑洞地址的 peer 不会把启动拖住。
 
-见 `.env.example`：`LLM_*`（provider/model/baseURL/apiKey/temperature）、`SANDBOX_*`
-（root/timeoutMs/maxOutputBytes）、`CHECKPOINT_DB`、`SKILLS_DIR`、`MCP_CONFIG`、`A2A_PEERS`、
-`A2A_*`（port/publicUrl/agentName/description）、`LOG_LEVEL`。
+---
+
+## 编写 Skill
+
+### 目录结构
+
+```
+skills/
+└─ hello-world/
+   ├─ SKILL.md      # 必填：声明 + 正文
+   └─ tool.ts       # 可选：自带工具
+```
+
+放在 `skills/` 下的每个子目录都会被扫描，**新增 skill 不需要改代码、不需要重新构建**。
+
+### `SKILL.md`
+
+```markdown
+---
+name: hello-world
+description: 演示 skill：回显用户输入，并演示读取沙箱文件
+allowed-tools: [hello-world_echo, sandbox_exec, sandbox_write_file]
+---
+
+当用户要求「演示」「打招呼」「回显」时，调用 hello-world_echo 工具回显其输入。
+
+若用户想验证沙箱能力，先用 sandbox_write_file 写入一个文件，
+再用 sandbox_exec 执行 `cat` 读取它，把结果如实转述给用户。
+```
+
+frontmatter 字段：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `name` | 是 | skill 名，也是工具名前缀的来源 |
+| `description` | 是 | 一句话说明，**会被注入系统提示**，写清「什么时候该用」 |
+| `allowed-tools` | 否 | 声明性字段，**首版不强制执行**，但应写对真实工具名 |
+
+> frontmatter 只支持 `key: value` 与行内数组 `[a, b]` 这两种写法（手写 YAML 子集，没有引入 YAML 解析库）。多行列表、嵌套映射都不支持。值里的成对引号会被剥掉。
+
+正文就是给模型看的详细用法说明。
+
+### `tool.ts`（可选）
+
+```ts
+import { tool } from 'langchain';
+import { z } from 'zod';
+
+export const tools = [
+  tool(async ({ value }) => `你好，${value}！`, {
+    name: 'echo',
+    description: '回显传入的字符串并加前缀问候。',
+    schema: z.object({ value: z.string().min(1) }),
+  }),
+];
+```
+
+契约：`export const tools = [...]`，每个元素是 LangChain `tool()` 的结果。
+
+> `tool.ts` 会在启动时被**动态 import 并执行**。把 skill 目录当作可信输入——它等价于允许在 agent 进程里跑代码。
+
+### 工具命名与冲突
+
+工具名按来源加前缀，避免不同来源的同名工具互相覆盖：
+
+| 来源 | 命名 | 例 |
+|---|---|---|
+| 内置 | 原名 | `sandbox_exec`、`load_skill` |
+| Skill | `<skill 名>_<工具名>` | `hello-world_echo` |
+| MCP | `<server 名>_<工具名>` | `filesystem_read_file` |
+| A2A peer | `ask_<peer 名>` | `ask_remote-agent` |
+
+不同来源撞名时按 **builtin > skill > mcp > a2a** 保留优先级高的，后者加数字后缀（`dup`、`dup_1`）并在日志里告警。
+
+### 渐进式披露
+
+启动时**只**把每个 skill 的 `name` 与 `description` 注入系统提示，正文不进提示词。模型判断某个 skill 相关时，再调用内置的 `load_skill` 按名字拉完整正文。
+
+这样提示词只随 skill 数量线性增长一点点，而不是被所有正文撑大。
+
+---
 
 ## 扩展方式
 
 | 想做的事 | 改哪里 |
 |---|---|
-| 换 LLM 厂商 | 装 `@langchain/*` 包，在 `src/llm/factory.ts` 加一行 `registerProvider` |
-| 换沙箱实现 | 实现 `Sandbox` 接口，在 `src/sandbox/factory.ts` 加 `registerSandbox` |
+| 换 LLM 厂商 | 装 `@langchain/*` 包，在 `src/llm/factory.ts` 加一行 `registerProvider('xxx', …)` |
+| 换沙箱实现 | 实现 `Sandbox` 接口，在 `src/sandbox/factory.ts` 加 `registerSandbox('docker', …)` |
 | 新增 Skill | 在 `skills/<name>/` 放 `SKILL.md`（可选 `tool.ts`），无需改代码 |
 | 新增 MCP server | 编辑 `config/mcp.servers.json` |
 | 对接远端 agent | 编辑 `config/a2a.peers.json`，自动获得 `ask_<name>` 工具 |
+| 加新错误类型 | 在 `src/shared/errors.ts` 加一个 `AppError` 子类与对应 `ErrorCode` |
+
+跨模块导入只走对方的 `index.ts`（barrel），以保住模块边界——将来拆 monorepo 时可以按目录直接切。
+
+---
+
+## 目录结构
+
+```
+src/
+├─ agent/      运行时装配（AgentRuntime）、工具合并
+├─ a2a/        A2A 卡片 / 消息 / executor / server / client / 远程工具
+├─ config/     环境变量校验（loadConfig / loadEnvFileIfPresent）
+├─ llm/        provider 注册表（createChatModel / registerProvider）
+├─ mcp/        MCP 配置读取与连接（McpHub）
+├─ sandbox/    沙箱接口与本地实现（LocalProcessSandbox）
+├─ shared/     错误类型层次、日志、工具改名代理
+├─ skills/     Skill 加载器、注册表、load_skill 工具
+├─ tools/      内置工具（sandbox_exec / sandbox_write_file）
+├─ cli.ts      入口 1：本地 REPL
+└─ serve.ts    入口 2：A2A HTTP server
+skills/        用户 skill 目录（含 hello-world 示例）
+config/        mcp.servers.json / a2a.peers.json
+scripts/       check-node.ts（Node 版本断言）
+tests/         vitest 用例
+docs/          设计 spec 与实现计划
+```
+
+---
 
 ## 安全提示
 
-`LocalProcessSandbox` 只是**本地进程隔离，不是安全边界**。它做了路径穿越校验、超时中断
-（按进程组杀，避免孤儿孙进程）、环境变量白名单（不继承 `process.env`）和输出截断，但：
+**这个骨架默认是「本机开发工具」，不是多租户服务。上生产前请逐条读完这一节。**
 
-- **不解析符号链接**：`readFile` / `writeFile` 均跟随软链。沙箱内用 `ln -s /etc passwd` 建的
-  软链，`readFile` 会读到工作目录之外的内容，`writeFile` 同样会跟随软链写到外部目标。
-- 同机用户仍可通过其他途径影响进程。
+- **沙箱不是安全边界。** `LocalProcessSandbox` 只是**本地进程隔离**：超时按进程组杀、环境变量白名单（不继承 `process.env`）、输出截断。但：
+  - **路径穿越校验只作用于 `readFile` / `writeFile`** 这两个文件操作的相对路径参数。
+  - **`sandbox_exec` 的命令本身没有任何文件系统约束**——它只是 `spawn('/bin/sh', ['-c', command], { cwd: 工作目录, env: 白名单 })`，命令可以读写**整台机器**的任意路径（`cat /etc/hosts`、`rm -rf ~` 都不受限）。只有可选的 `cwd` 参数会做穿越校验。**不要拿它跑不可信输入。**
+- **沙箱不解析符号链接。** `readFile` / `writeFile` 都跟随软链——沙箱内 `ln -s /etc passwd` 建的软链，`readFile` 会读到工作目录之外的内容，`writeFile` 同样会跟随软链写到外部目标。
+- **skill 的 `tool.ts` 会被执行。** 启动时动态 import，等价于允许在 agent 进程里跑任意代码。只加载可信来源的 skill。
+- **MCP 与 A2A 都是无鉴权的。** `UserBuilder.noAuthentication` 意味着任何能访问端口的人都能调用你的 agent、也能让你的 agent 去连任意 MCP server。
+- **A2A 默认监听所有网卡。** `pnpm serve` 只绑定 `A2A_PORT`、不带 host 参数，因此同网段可达者都能调用这个**无鉴权**端点。`A2A_PUBLIC_URL` 只决定卡片上公布的地址，**不限制监听范围**；当前也没有配置项能把服务收回到本机。要收口就自己加反向代理与鉴权，或改 `src/serve.ts` 显式绑定 `127.0.0.1`。
 
-因此它只用于约束误操作，**不能用来隔离不可信代码**。需要强隔离时，用 `registerSandbox`
-换成容器或 VM 实现。
+---
 
-## 常用命令
+## 故障排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `需要 Node >= 22.12，当前为 18.17.0` | Node 版本过低 | `nvm use`（读取仓库 `.nvmrc`） |
+| `启动失败: 环境变量校验失败 → LLM_API_KEY: …` | `.env` 缺变量或格式不对 | `cp .env.example .env` 后按提示补齐 |
+| `LLM_BASE_URL: Invalid URL` | 基址不是合法 URL | 填完整地址（含 `https://` 与 `/v1` 之类路径） |
+| `未注册的 LLM provider: "xxx"` | `LLM_PROVIDER` 写了没注册的 id | 改成 `openai-compatible`，或在 `src/llm/factory.ts` 注册 |
+| REPL 里模型说「没有可用工具」 | SKILL.md 正文里让模型调用的工具名写错 | 工具真名是 `<skill 名>_<工具名>`（`allowed-tools` 首版不参与判定，写错它不会让工具消失） |
+| `A2A server 启动失败（端口 4124）: listen EADDRINUSE` | 端口被占 | 改 `A2A_PORT`，或停掉占用进程 |
+| 手工 curl 报 `VERSION_NOT_SUPPORTED` | 没带 `A2A-Version: 1.0` 头 | 补上该请求头 |
+| MCP server 连不上但 agent 仍能启动 | 单 server 失败被跳过 | 看 stderr 的 `[warn] app:mcp:` 行；该 server 的工具确实不会出现 |
+| 沙箱里的命令超时被杀 | 超过 `SANDBOX_TIMEOUT_MS` | 调大该变量，或在 skill 正文里改用更短命令 |
+
+---
+
+## 开发命令
 
 ```bash
 pnpm typecheck   # tsc --noEmit
 pnpm test        # vitest run
 pnpm build       # tsc -p tsconfig.build.json
+pnpm dev         # 本地 REPL
+pnpm serve       # A2A HTTP server
 ```
+
+测试覆盖的是**真实行为**：MCP 用真实 stdio 子进程、A2A 用真实 HTTP server + 真实 SDK 客户端、checkpointer 用真实 SQLite 文件。模型调用是唯一的例外——那需要真实 API key。
+
+当前验收状态见 `docs/superpowers/plans/2026-11-17-agent-runtime-scaffold.md` 附录 B。
