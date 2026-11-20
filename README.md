@@ -15,7 +15,7 @@
 | **A2A 互联** | 既能被别的 agent 调用（expose 卡片 + JSON-RPC），也能主动调远端 agent（自动获得 `ask_<name>` 工具） |
 | **多轮会话** | SQLite checkpointer 持久化，CLI 会话 id 与 A2A contextId 都直接当 thread_id |
 | **上下文压缩** | 历史超阈值时自动压成一条中文结构化摘要并保留最近原文，也可以随时输入 `/summarize` 手动收一收 |
-| **可测试** | 276 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
+| **可测试** | 283 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
 
 ## 环境要求
 
