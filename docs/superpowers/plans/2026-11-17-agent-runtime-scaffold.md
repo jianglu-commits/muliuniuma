@@ -4222,7 +4222,7 @@ git commit -m "fix: abort underlying agent work when an A2A task is canceled"
 - Create: `README.md`
 - Test: `tests/cli.test.ts`（入口冒烟，spawn 真实进程）、`tests/skills.example.test.ts`（示例 skill）
 
-**状态：已完成**（commits `3b107e8..1619d25`，审查 Approved + 1 修复轮后复审 Approved；基线 15 文件 / 232 测试，typecheck 与 build 均 exit 0）
+**状态：已完成**（commits `3b107e8..1619d25`，审查 Approved + 1 修复轮后复审 Approved；本任务结束时基线 15 文件 / 232 测试，最终整分支修复后为 **235 测试**）
 
 > **实现偏离简报之处（控制器裁决 R1–R12）**
 >
