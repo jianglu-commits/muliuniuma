@@ -134,7 +134,9 @@ export function extractSummaryText(update: BaseMessage[]): string | undefined {
       if (text.includes(marker)) return undefined;
     }
     const prefix = `${SUMMARY_PREFIX}\n\n`;
-    return text.startsWith(prefix) ? text.slice(prefix.length) : text;
+    const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+    // 空/纯空白正文不算有效摘要：放行会把被摘要段换成一条空前缀消息，静默丢历史。
+    return body.trim().length === 0 ? undefined : body;
   }
   return undefined;
 }

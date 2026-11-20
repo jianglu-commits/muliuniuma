@@ -247,4 +247,12 @@ describe('extractSummaryText', () => {
   it('没有摘要消息时返回 undefined', () => {
     expect(extractSummaryText([new HumanMessage('普通消息')])).toBeUndefined();
   });
+
+  it('空正文视为失败，避免把历史换成空前缀消息', () => {
+    expect(extractSummaryText([summaryMessage('')])).toBeUndefined();
+  });
+
+  it('纯空白正文视为失败', () => {
+    expect(extractSummaryText([summaryMessage('   \n  ')])).toBeUndefined();
+  });
 });
