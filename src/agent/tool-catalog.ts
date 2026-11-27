@@ -35,5 +35,5 @@ export function selectTier(
 
 /** 区分客户端工具与 provider 原生工具 dict：后者没有 name/schema，不参与过滤与 token 估算。 */
 export function isNamedTool(value: object): value is StructuredToolInterface {
-  return 'name' in value && typeof value.name === 'string' && Runnable.isRunnable(value);
+  return 'name' in value && typeof value.name === 'string' && Boolean(Runnable.isRunnable(value));
 }
