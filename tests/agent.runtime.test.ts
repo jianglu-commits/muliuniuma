@@ -748,6 +748,7 @@ class ToolTurnChatModel extends FakeListChatModel {
 
   constructor(
     private readonly calls: { name: string; args: Record<string, string> }[],
+    private readonly bound: string[][] = [],
   ) {
     super({ responses: [] } as FakeChatInput);
   }
@@ -769,6 +770,7 @@ class ToolTurnChatModel extends FakeListChatModel {
   override bindTools(
     tools: (StructuredTool | ToolSpec)[],
   ): ReturnType<FakeListChatModel['bindTools']> {
+    this.bound.push(tools.map((t) => ('name' in t ? String(t.name) : '?')));
     return this.withConfig({});
   }
 }
@@ -832,6 +834,7 @@ describe('工具加载与清理装配', () => {
 
   it('schema token 超 eager 预算时升档并注入 activate_tools', async () => {
     const bound: string[][] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const runtime = await AgentRuntime.create(
       makeConfig(dir!, undefined, { TOOL_LOADING_EAGER_MAX_TOKENS: '1' }),
       { model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, [], bound) },
@@ -841,8 +844,11 @@ describe('工具加载与清理装配', () => {
       const names = bound.at(-1) ?? [];
       expect(names).toContain('activate_tools');
       expect(names).not.toContain('demo_echo');
+      const logs = stderr.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logs).toMatch(/工具加载档位 catalog：可延迟工具 1 个，激活上限 \d+/);
     } finally {
       await runtime.dispose();
+      stderr.mockRestore();
     }
   });
 
@@ -937,10 +943,15 @@ describe('工具加载与清理装配', () => {
       join(dir!, 'skills', 'demo', 'tool.ts'),
       SKILL_TOOL_SOURCE.replace("description: '回显'", `description: '${'测'.repeat(2000)}'`),
     );
-    const model = new ToolTurnChatModel([
-      { name: 'load_skill', args: { name: 'demo' } },
-      { name: 'load_skill', args: { name: 'demo' } },
-    ]);
+    const bound: string[][] = [];
+    const model = new ToolTurnChatModel(
+      [
+        { name: 'load_skill', args: { name: 'demo' } },
+        { name: 'load_skill', args: { name: 'demo' } },
+      ],
+      bound,
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const runtime = await AgentRuntime.create(
       makeConfig(dir!, undefined, {
         TOOL_LOADING_EAGER_MAX_TOKENS: '1',
@@ -951,11 +962,19 @@ describe('工具加载与清理装配', () => {
     );
     try {
       await runtime.run('你好', { threadId: 'wire-order' });
+      // 先自证前提：胖 tool.ts 真加载成功且升到 catalog 档、胖工具真被过滤掉。
+      // 否则可延迟集为空 → 档位 eager → 计数远低于阈值，下面的顺序断言会假绿。
+      const logs = stderr.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logs).toContain('工具加载档位 catalog');
+      const names = bound.at(-1) ?? [];
+      expect(names).toContain('activate_tools');
+      expect(names).not.toContain('demo_echo');
       const seen = toolTexts(model.seen.at(-1) ?? []);
       expect(seen).toHaveLength(2);
       expect(seen).not.toContain('[已清理的工具输出]');
     } finally {
       await runtime.dispose();
+      stderr.mockRestore();
     }
   });
 });
