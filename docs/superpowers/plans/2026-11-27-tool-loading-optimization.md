@@ -500,7 +500,7 @@ pnpm vitest run tests/agent.tool-catalog.test.ts
 pnpm typecheck
 ```
 
-Expected: 全部 PASS（Task 1 的 12 条 + 本任务 19 条 = 31 条）；typecheck 退出码 0。
+Expected: 全部 PASS（Task 1 修复后 15 条 + 本任务 19 条 = 34 条）；typecheck 退出码 0。
 
 - [ ] **Step 5: 提交**
 
@@ -1828,7 +1828,7 @@ pnpm vitest run 2>&1 | tail -6
 5. **SDK 硬约束**：`wrapModelCall` 只能减不能增/换（`AgentNode.js:265`、`:267`）；`request.messages` 与 `state.messages` 同引用（`AgentNode.js:359`）；`contextEditingMiddleware` 无 `tokenCounter` 注入口；`providerToolSearchMiddleware` 对 OpenAI 兼容网关不可用；`llmToolSelectorMiddleware` 的选择器只看得到工具名。
 6. **为什么不引入额外 LLM 调用**：三档全部靠本地判据与本地检索，零配额开销、零额外延迟。
 7. **配置表**：10 个变量、默认值、含义，以及 `EAGER_MAX_* ≤ CATALOG_MAX_*` 的约束。
-8. **语义与边界**：被隐藏/淘汰的工具仍可执行；清理可逆、checkpoint 原文不动；清理不能推迟摘要；token 是 CJK 感知近似值；保留窗口内的超大输出仍靠 `SANDBOX_MAX_OUTPUT_BYTES` 兜；不要与对话并发。
+8. **语义与边界**：被隐藏/淘汰的工具仍可执行；清理可逆、checkpoint 原文不动；清理不能推迟摘要；token 是 CJK 感知近似值；**检索只切 ASCII 与 CJK**，带重音拉丁字母/西里尔字母等会被切词丢弃、这类工具名检索召回不到（可用 `activate_tools` 直接指定名字）；保留窗口内的超大输出仍靠 `SANDBOX_MAX_OUTPUT_BYTES` 兜；不要与对话并发。
 9. **测试证据**：Step 1 取到的真实数字，以及三个新测试文件各自覆盖什么。
 
 - [ ] **Step 3: 更新 README.md**
