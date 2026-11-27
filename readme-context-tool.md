@@ -33,8 +33,8 @@
 细节：
 
 - **选档在装配期算一次**（`src/agent/tool-catalog.ts` 的 `selectTier`）。工具表装配后不再变化，每回合重算是纯浪费；每回合变化的只有「绑定哪些」，那取决于激活状态。
-- `TOOL_LOADING_ENABLED=false` 时同样全量绑定，但装配日志写「工具加载已关闭」，**不谎称档位 eager**——归因不同。无论哪种情况都有一条 info 日志记录档位与判据数值，便于归因。
-- **目录描述必须截断**：取 `description` 首行、折叠连续空白、截断到 **80 个码点**（超出补 `…`）。截断用 `[...str]` 按码点迭代，而不是 `String.prototype.slice` 的 UTF-16 口径——`isCjk` 刻意覆盖扩展 B 区（U+20000..U+3FFFF），按 UTF-16 切会把 astral 平面汉字切成孤立代理对。该常量固定（`CATALOG_DESC_LIMIT = 80`），不做配置项。不截断的话，MCP 工具的多段长描述会让目录体积逼近完整 schema，token 收益归零。
+- `TOOL_LOADING_ENABLED=false` 时同样全量绑定，但装配日志写「工具加载已关闭」，**不谎称档位 eager**——归因不同。无论哪种情况都有一条 info 日志便于归因，但记的数值不同：eager / 已关闭分支（`src/agent/runtime.ts`）记可延迟条数与 token 总和；catalog / search 分支（`src/agent/tool-loading.ts`）记档位、可延迟条数与激活上限，**不含 token 总和**。
+- **目录描述必须截断**：取 `description` 首行、折叠连续空白、截断到 **80 个码点**（超出补 `…`）。截断用 `[...str]` 按码点迭代，而不是 `String.prototype.slice` 的 UTF-16 口径——`isCjk` 刻意覆盖扩展 B–H 区（U+20000..U+3FFFF），按 UTF-16 切会把 astral 平面汉字切成孤立代理对。该常量固定（`CATALOG_DESC_LIMIT = 80`），不做配置项。不截断的话，MCP 工具的多段长描述会让目录体积逼近完整 schema，token 收益归零。
 - **检索打分**（`searchCatalog`）：query 切词去重后，命中 `name` 记 2 分、命中 `description` 记 1 分（**匹配用完整描述**，截断只用于展示，否则长描述里的关键词召回不到），按分降序、同分按名字排序保证稳定，取前 `searchTopK` 条，0 分不返回。`search_tools` **只返回候选、不自动激活**——激活是模型的显式决定，避免检索噪声直接占窗口。
 
 ## 3. 数据流
@@ -112,7 +112,7 @@ default 必须落在 **`inputSchema`** 上（实现里 valueSchema 与 inputSche
 
 三档全部靠**本地判据与本地检索**：
 
-- 选档是两次整数比较；
+- 选档是至多四次整数比较（每档边界各比条数与 token）；
 - 目录是字符串渲染；
 - 检索是自写词频重叠打分（ASCII 按词切 + CJK 单字与相邻二字 bigram），不引新依赖、不做 embedding；
 - 激活是模型在正常回合内的显式工具调用，不是额外调用。
@@ -121,7 +121,7 @@ default 必须落在 **`inputSchema`** 上（实现里 valueSchema 与 inputSche
 
 ## 7. 配置表
 
-10 个新变量，定义在 `src/config/env.ts`，启动期 zod 校验，缺失或非法立即报错：
+10 个新变量，定义在 `src/config/env.ts`，启动期 zod 校验。全部带 `.default()`：**缺失不报错，静默取默认值**；**非法值才在启动期抛 `ConfigError`**（eager/catalog 上限反置的跨字段约束同样启动期抛错，见下）：
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
