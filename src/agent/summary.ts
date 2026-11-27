@@ -62,7 +62,7 @@ const SUMMARY_FAILURE_MARKERS = [
 ];
 
 /** CJK 感知：CJK 字符一字一 token，其余四字符一 token。 */
-function isCjk(code: number): boolean {
+export function isCjk(code: number): boolean {
   return (
     (code >= 0x2e80 && code <= 0xa4cf) ||
     (code >= 0xac00 && code <= 0xd7af) ||
@@ -73,7 +73,7 @@ function isCjk(code: number): boolean {
   );
 }
 
-function countTextTokens(text: string): number {
+export function countTextTokens(text: string): number {
   let cjk = 0;
   let rest = 0;
   for (const char of text) {
