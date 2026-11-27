@@ -113,10 +113,19 @@ describe('briefDescription', () => {
     expect(briefDescription('第一行\n第二行')).toBe('第一行');
   });
 
+  it('连续空白折叠成单空格并去掉首尾空白', () => {
+    expect(briefDescription('  多个   空格\t和制表  ')).toBe('多个 空格 和制表');
+  });
+
   it('超长截断并补省略号', () => {
     const long = '测'.repeat(200);
     const brief = briefDescription(long);
     expect(brief).toBe(`${'测'.repeat(CATALOG_DESC_LIMIT)}…`);
+  });
+
+  it('截断上限就是规格里的 80 个字符', () => {
+    // 期望值写死字面量：用 CATALOG_DESC_LIMIT 推导会让常量改了也测不出来。
+    expect(briefDescription('测'.repeat(100))).toBe(`${'测'.repeat(80)}…`);
   });
 
   it('恰好等于上限时不加省略号', () => {
@@ -221,5 +230,26 @@ describe('searchCatalog', () => {
   it('同分时按名字排序，结果稳定', () => {
     const same = [makeTool('b_tool', '共同描述'), makeTool('a_tool', '共同描述')];
     expect(searchCatalog(same, '共同描述', 8).map((m) => m.name)).toEqual(['a_tool', 'b_tool']);
+  });
+
+  // 三种命中形态互相竞争，且入参顺序既非分数序也非名字序，排序必须真的干活。
+  const competing = [
+    makeTool('zzz_other', 'read the thing'),
+    makeTool('read_file', '无关说明'),
+    makeTool('read_it', 'read again'),
+  ];
+
+  it('按分数降序：名字+描述双命中 > 仅名字命中 > 仅描述命中', () => {
+    const hits = searchCatalog(competing, 'read', 8);
+    expect(hits.map((m) => m.name)).toEqual(['read_it', 'read_file', 'zzz_other']);
+  });
+
+  it('名字命中记 2 分、描述命中记 1 分，同一工具两处命中相加', () => {
+    const hits = searchCatalog(competing, 'read', 8);
+    expect(hits.map((m) => m.score)).toEqual([3, 2, 1]);
+  });
+
+  it('topK 留下的是分数最高的前 K 条，不是最差的', () => {
+    expect(searchCatalog(competing, 'read', 2).map((m) => m.name)).toEqual(['read_it', 'read_file']);
   });
 });
