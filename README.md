@@ -16,7 +16,7 @@
 | **多轮会话** | SQLite checkpointer 持久化，CLI 会话 id 与 A2A contextId 都直接当 thread_id |
 | **上下文压缩** | 历史超阈值时自动压成一条中文结构化摘要并保留最近原文，也可以随时输入 `/summarize` 手动收一收 |
 | **工具加载优化** | 按工具条数与 schema token 三档选加载方式（全量 / 目录+按需激活 / 检索+按需激活），零额外 LLM 调用；旧工具输出在模型视图层清理，checkpoint 原文不动 |
-| **可测试** | 368 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
+| **可测试** | 370 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
 
 ## 环境要求
 
@@ -372,6 +372,10 @@ export const tools = [
 | A2A peer | `ask_<peer 名>` | `ask_remote-agent` |
 
 不同来源撞名时按 **builtin > skill > mcp > a2a** 保留优先级高的，后者加数字后缀（`dup`、`dup_1`）并在日志里告警。
+
+还有一类**元工具保留名**冲突：工具加载中间件会注册 `activate_tools` 与 `search_tools` 两个元工具。**仅当加载中间件真的安装时**（`TOOL_LOADING_ENABLED=true` 且档位为 catalog / search，而非 eager），可延迟工具（skill / mcp / a2a）里与这两个名字同名的会被让位改名——加数字后缀（`activate_tools_1`、`activate_tools_2`…，取当前未被占用的最小值），静态工具表与可延迟集一并替换，目录 / 检索 / 激活名单才一致，并打一条 warn 日志（同时点名原名与新名）。**关闭开关或走 eager 档时不注册元工具，也不改名。**
+
+这条通过普通配置就能触发：skill 工具名是 `<skill 名>_<工具名>`，所以一个叫 `activate` 的 skill 目录暴露一个名为 `tools` 的工具，拼出来恰好是 `activate_tools`。后果是 **`SKILL.md` 正文里让模型调用的那个名字不再以原拼写存在**——模型得改用日志里给出的新名（如 `activate_tools_1`）。
 
 ### 渐进式披露
 

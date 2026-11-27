@@ -154,6 +154,7 @@ default 必须落在 **`inputSchema`** 上（实现里 valueSchema 与 inputSche
 - **同一次 `activate_tools` 调用内的重复名字会去重**，只占一个激活名额；重复激活已激活的名字会刷新新近度（FIFO 位置移到末尾）；传入已常驻的名字视为 no-op，回执「已常驻，无需激活」；未知名字在回执里逐个点名。
 - **淘汰对模型可见，不静默**：每次模型调用的 systemMessage 都列出当前真实生效的激活清单，FIFO 淘汰后模型在下一次模型调用（同一次 run 内即生效）看到的就是淘汰后的清单。
 - **`load_skill` 与 `activate_tools` 并存**：前者读 skill 说明书正文，后者绑工具 schema，语义不同，都保留。
+- **元工具名是保留名，撞名的可延迟工具会让位改名**。`activate_tools` / `search_tools`（`src/agent/tool-catalog.ts` 的 `ACTIVATE_TOOL_NAME` / `SEARCH_TOOL_NAME`）由加载中间件注册；`reserveMetaToolNames`（`src/agent/runtime.ts`）**仅在 `installLoading`（`enabled && tier !== 'eager'`）时**把可延迟集合里与这两个名字同名的工具经 `renameTool` 代理加数字后缀（`activate_tools_1`…，取静态表里未占用的最小值），并同步替换静态表与可延迟集，目录 / 检索 / 激活名单才一致，同时打一条 warn（点名原名与新名）。**关闭开关或 eager 档不注册元工具，也不改名。**这条经普通配置可达：skill 工具名是 `${manifest.name}_${original.name}`（`src/skills/registry.ts`），名为 `activate` 的 skill 暴露名为 `tools` 的工具即拼出 `activate_tools`——此时 `SKILL.md` 里写的调用名不再以原拼写存在，模型须改用新名。
 - **不要与对话并发**：激活状态与摘要写回一样，后写者可能覆盖前者。
 
 ## 9. 测试证据
@@ -162,7 +163,7 @@ default 必须落在 **`inputSchema`** 上（实现里 valueSchema 与 inputSche
 
 ```
  Test Files  20 passed (20)
-      Tests  368 passed (368)
+      Tests  370 passed (370)
 ```
 
 `pnpm typecheck` 与 `pnpm build` 均退出码 0。
@@ -175,6 +176,6 @@ default 必须落在 **`inputSchema`** 上（实现里 valueSchema 与 inputSche
 | `tests/agent.tool-loading.test.ts` | catalog 档只绑常驻 + `activate_tools`；目录进系统提示；激活后完整 schema 被绑定（**过滤传原实例、不触发 SDK 增/换校验**）；激活跨 invoke 持久；**摘要式 `REMOVE_ALL_MESSAGES` 后激活不丢**；FIFO 淘汰且清单对模型可见；重复激活刷新新近度；**同一请求内重复名字只占一个名额**；未知名字点名；常驻名字 no-op；元工具自身名字也算常驻；search 档绑双元工具、不列目录、检索不自动激活、无匹配给可执行下一步、检索后再激活即可绑定 |
 | `tests/agent.tool-clearing.test.ts` | 超阈值旧 ToolMessage 换占位符；未达阈值不清理；**checkpoint 原文一字未改**；CJK 口径比 chars/4 更早触发；保留窗口内不清；重复调用幂等；**schema token 计入判据**（消息本身不超阈也会清理） |
 
-两个既有文件同步扩展：`tests/config.env.test.ts`（10 个新变量的默认值与非法值报错，含 `EAGER > CATALOG` 非法组合）、`tests/agent.runtime.test.ts`（装配：档位日志、eager 不安装中间件、开关关闭时日志不谎称 eager、清理默认安装 / 关闭不安装、**清理在加载内层只数过滤后的绑定集**）。
+两个既有文件同步扩展：`tests/config.env.test.ts`（10 个新变量的默认值与非法值报错，含 `EAGER > CATALOG` 非法组合）、`tests/agent.runtime.test.ts`（装配：档位日志、eager 不安装中间件、开关关闭时日志不谎称 eager、清理默认安装 / 关闭不安装、**清理在加载内层只数过滤后的绑定集**、**与元工具撞名的 skill 工具让位改名（`activate_tools_1` 仍可激活调用、真元工具仍写激活通道、warn 点名新旧名）**、**关闭加载时撞名工具保留原名不改**）。
 
 模型替身沿用既有模式：加载测试用 `FakeListChatModel` 子类记录每次真实绑定的工具名与系统提示，装配与摘要测试用 `ScriptedChatModel` / `RecordingChatModel`。工具加载不引入额外 LLM 调用，因此不需要新的替身分流逻辑。
