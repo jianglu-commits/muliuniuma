@@ -1698,10 +1698,9 @@ Expected: FAIL —— 日志里没有「工具加载档位」，`activate_tools`
 
 - [ ] **Step 3: 写最小实现**
 
-`src/agent/index.ts` 追加三行：
+`src/agent/index.ts` 追加两行（`tool-catalog.js` 已在 Task 1 导出，不要重复添加）：
 
 ```ts
-export * from './tool-catalog.js';
 export * from './tool-loading.js';
 export * from './context-clearing.js';
 ```
