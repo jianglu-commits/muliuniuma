@@ -127,6 +127,21 @@ describe('briefDescription', () => {
   it('空描述返回空串', () => {
     expect(briefDescription('')).toBe('');
   });
+
+  it('扩展区汉字按码点截断，保留上限个字符', () => {
+    const brief = briefDescription('𠀀'.repeat(100));
+    expect(brief).toBe(`${'𠀀'.repeat(CATALOG_DESC_LIMIT)}…`);
+    expect([...brief.slice(0, -1)]).toHaveLength(CATALOG_DESC_LIMIT);
+    expect(/\p{Surrogate}/u.test(brief)).toBe(false);
+  });
+
+  it('截断边界落在代理对中间时不留下孤立代理', () => {
+    // 前置一个 ASCII 字符，让第 80 个 UTF-16 码元正好切在代理对中间
+    const brief = briefDescription(`a${'𠀀'.repeat(100)}`);
+    expect(/\p{Surrogate}/u.test(brief)).toBe(false);
+    expect([...brief.slice(0, -1)]).toHaveLength(CATALOG_DESC_LIMIT);
+    expect(brief).toBe(`a${'𠀀'.repeat(CATALOG_DESC_LIMIT - 1)}…`);
+  });
 });
 
 describe('renderCatalog', () => {
