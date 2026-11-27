@@ -68,6 +68,21 @@
 
 所以清理**不能**减少摘要的触发。它省的是每一次模型调用的输入 token，包括那些尚未达到摘要阈值的回合。两条轴独立生效，不互相替代。
 
+### 3.5 已实测验证的五条前提
+
+用一次性探针（`createAgent` + `MemorySaver` + `FakeListChatModel` 替身）实跑确认，非推断：
+
+1. **`StateSchema` + `ReducedValue` 配 zod v4 可用**，但 **`inputSchema` 必须自带 `.default()`**。
+   `utils.js:57` 的必填检查取 `field.inputSchema || field.valueSchema`——只在 `valueSchema` 上放 `.default()` 会被绕过，启动直接抛
+   `Middleware "…" has required state fields that must be initialized: activatedTools: Required`。
+2. **`wrapModelCall` 里过滤静态工具表不会触发 SDK 的增/换校验**（传原实例、只减不增）。
+3. **激活状态跨 `invoke` 持久**（同一 thread）。
+4. **FIFO 淘汰按预期生效**：上限 3、依次激活 t1,t2 → t3,t4，结果恰为 `t2,t3,t4`。
+5. **激活扛住 `REMOVE_ALL_MESSAGES`**：清空 `messages` 通道前后，`activatedTools` 均为 `["t2","t3","t4"]`。这是选自定义通道而非「从历史推导」的决定性依据。
+6. **真实 `Command` 路径可写通道**：模型发 `activate_tools` 的 tool_call → ToolNode → `Command.update` → 通道值为 `["t1","t2"]`。
+
+附带观察：绑定顺序是 `[...静态工具, ...中间件工具]`（`ReactAgent.js:72`），所以元工具出现在列表末尾。不影响语义。
+
 ## 4. 模块边界
 
 `src/agent/` 下三个新文件：
@@ -80,7 +95,7 @@
 
 `tool-catalog.ts` 不碰中间件机制，选档与检索的全部逻辑可用纯函数测，不需要起 agent。
 
-`countTextTokens` 目前是 `summary.ts` 内的私有函数。**从 `summary.ts` 导出它**，`tool-catalog.ts` 经 barrel 引用。不复制第二份实现，避免两套口径漂移。
+`countTextTokens` 与 `isCjk` 目前是 `summary.ts` 内的私有函数。**从 `summary.ts` 导出这两个**，`tool-catalog.ts` 经同目录相对路径引用。不复制第二份实现，避免两套 CJK 口径漂移（检索切词同样需要 `isCjk`）。
 
 ## 5. 选档判据
 
@@ -121,7 +136,7 @@ export function selectTier(count: number, tokens: number, p: ToolLoadingPolicy):
 ```ts
 new StateSchema({
   activatedTools: new ReducedValue(z.array(z.string()).default(() => []), {
-    inputSchema: z.array(z.string()),
+    inputSchema: z.array(z.string()).default(() => []),   // default 必须在 inputSchema 上，见 §3.5
     reducer: (current, next) => {
       // next 中的名字先从 current 移除旧位置再追加：重新激活即刷新新近度
       // 合并后超过 maxActiveTools 时从头部丢弃（FIFO）
