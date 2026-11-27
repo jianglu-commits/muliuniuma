@@ -136,20 +136,53 @@ describe('catalog 档加载中间件', () => {
     expect(model.systemTexts.at(-1)).toContain('t2、t3、t4');
   });
 
+  it('重复激活已激活的名字会刷新最近性', async () => {
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['t1', 't2'] } });
+    const agent = build(model, [dummy('t1'), dummy('t2'), dummy('t3'), dummy('t4')]);
+    const config = { configurable: { thread_id: 'k' } };
+    await agent.invoke({ messages: [{ role: 'human', content: '第一批' }] }, config);
+    await agent.updateState(config, { activatedTools: ['t1'] }, '__start__');
+    await agent.updateState(config, { activatedTools: ['t3', 't4'] }, '__start__');
+    await agent.invoke({ messages: [{ role: 'human', content: '再激活后' }] }, config);
+    const bound = model.boundNames.at(-1) ?? [];
+    expect(bound).toContain('t1');
+    expect(bound).not.toContain('t2');
+    expect(model.systemTexts.at(-1)).toContain('t1、t3、t4');
+  });
+
+  it('同一次请求里的重复名字只占一个激活名额', async () => {
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['t1', 't1'] } });
+    const agent = build(model, [dummy('t1'), dummy('t2')]);
+    const config = { configurable: { thread_id: 'l' } };
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, config);
+    const snapshot: { values: { activatedTools?: string[] } } = await agent.getState(config);
+    expect(snapshot.values.activatedTools).toEqual(['t1']);
+    const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('已激活：t1');
+    expect(texts).not.toContain('t1、t1');
+  });
+
   it('未知工具名在工具回执里点名', async () => {
-    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['nope'] } });
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['nope', 'nada'] } });
     const agent = build(model, [dummy('t1')]);
-    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 'g' } });
+    const config = { configurable: { thread_id: 'g' } };
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, config);
     const texts = result.messages.map((m) => String(m.content)).join('\n');
     expect(texts).toContain('未知工具名');
     expect(texts).toContain('nope');
+    expect(texts).toContain('nada');
+    const snapshot: { values: { activatedTools?: string[] } } = await agent.getState(config);
+    expect(snapshot.values.activatedTools).toEqual([]);
   });
 
   it('已常驻的名字回一句无需激活', async () => {
     const model = new RecordingModel({ name: 'activate_tools', args: { names: ['always_on'] } });
     const agent = build(model, [dummy('t1')]);
-    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 'h' } });
-    expect(result.messages.map((m) => String(m.content)).join('\n')).toContain('已常驻');
+    const config = { configurable: { thread_id: 'h' } };
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, config);
+    expect(result.messages.map((m) => String(m.content)).join('\n')).toContain('已常驻，无需激活');
+    const snapshot: { values: { activatedTools?: string[] } } = await agent.getState(config);
+    expect(snapshot.values.activatedTools).toEqual([]);
   });
 
   it('激活元工具自身的名字也算已常驻', async () => {

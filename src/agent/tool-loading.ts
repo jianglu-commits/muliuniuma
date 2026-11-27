@@ -26,7 +26,8 @@ function createActivateTool(
 ): StructuredToolInterface {
   return tool(
     ({ names }, config) => {
-      const accepted = names.filter((name) => known.has(name));
+      // 同一请求内重复名字去重后再追加，否则会烧掉多个 FIFO 名额并渲染成「t1、t1」。
+      const accepted = [...new Set(names.filter((name) => known.has(name)))];
       const alreadyOn = names.filter((name) => resident.has(name));
       const unknown = names.filter((name) => !known.has(name) && !resident.has(name));
       const lines: string[] = [];
