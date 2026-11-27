@@ -29,6 +29,11 @@ import type {
   SummaryOutcome,
   SummaryPolicy,
 } from './summary.js';
+import { estimateToolTokens, selectTier } from './tool-catalog.js';
+import type { ToolLoadingPolicy } from './tool-catalog.js';
+import { createToolLoadingMiddleware } from './tool-loading.js';
+import { createToolClearingMiddleware } from './context-clearing.js';
+import type { ToolClearingPolicy } from './context-clearing.js';
 
 export interface AgentRuntimeDeps {
   model?: BaseChatModel;
@@ -110,18 +115,20 @@ export class AgentRuntime {
       mcpHub = await McpHub.fromConfig(config.mcpConfigPath, appLogger.child('mcp'));
       const a2aHub = await A2AClientHub.fromConfig(config.a2aPeersPath, appLogger.child('a2a'));
 
-      const tools = mergeToolGroups(
-        [
-          {
-            source: 'builtin',
-            tools: [...createSandboxTools(sandbox), createLoadSkillTool(skillRegistry)],
-          },
-          { source: 'skill', tools: await skillRegistry.loadTools() },
-          { source: 'mcp', tools: await mcpHub.tools() },
-          { source: 'a2a', tools: createRemoteAgentTools(a2aHub) },
-        ],
-        appLogger.child('tools'),
-      );
+      const builtinTools = [
+        ...createSandboxTools(sandbox),
+        createLoadSkillTool(skillRegistry),
+      ];
+      const toolGroups = [
+        { source: 'builtin' as const, tools: builtinTools },
+        { source: 'skill' as const, tools: await skillRegistry.loadTools() },
+        { source: 'mcp' as const, tools: await mcpHub.tools() },
+        { source: 'a2a' as const, tools: createRemoteAgentTools(a2aHub) },
+      ];
+      const tools = mergeToolGroups(toolGroups, appLogger.child('tools'));
+      const alwaysOn = builtinTools.map((t) => t.name);
+      const alwaysOnNames = new Set(alwaysOn);
+      const deferrable = tools.filter((t) => !alwaysOnNames.has(t.name));
 
       await mkdir(dirname(config.checkpointDb), { recursive: true });
       checkpointer = SqliteSaver.fromConnString(config.checkpointDb);
@@ -134,6 +141,33 @@ export class AgentRuntime {
         .join('\n\n');
 
       const agentLogger = appLogger.child('agent');
+      const toolLoadingPolicy: ToolLoadingPolicy = { ...config.toolLoading };
+      const deferrableTokens = deferrable.reduce(
+        (sum, t) => sum + estimateToolTokens(t),
+        0,
+      );
+      const tier = selectTier(deferrable.length, deferrableTokens, toolLoadingPolicy);
+      const toolLoadingMiddleware =
+        toolLoadingPolicy.enabled && tier !== 'eager'
+          ? createToolLoadingMiddleware({
+              tier,
+              deferrable,
+              alwaysOn,
+              policy: toolLoadingPolicy,
+              logger: agentLogger,
+            })
+          : undefined;
+      if (toolLoadingMiddleware === undefined) {
+        agentLogger.info(
+          `工具加载档位 eager：可延迟工具 ${deferrable.length} 个 / ${deferrableTokens} token，全量绑定`,
+        );
+      }
+
+      const toolClearingPolicy: ToolClearingPolicy = { ...config.toolClearing };
+      const clearingMiddleware = toolClearingPolicy.enabled
+        ? createToolClearingMiddleware(toolClearingPolicy, agentLogger)
+        : undefined;
+
       const summaryPolicy: SummaryPolicy = {
         enabled: config.summary.enabled,
         triggerTokens: config.summary.triggerTokens,
@@ -151,7 +185,12 @@ export class AgentRuntime {
         tools,
         systemPrompt: prompt,
         checkpointer,
-        middleware: summaryMiddleware ? [summaryMiddleware.agentMiddleware] : [],
+        // 顺序有意义：数组首个是最外层 wrapModelCall，清理必须在加载内层才能看到过滤后的绑定集。
+        middleware: [
+          ...(toolLoadingMiddleware ? [toolLoadingMiddleware] : []),
+          ...(clearingMiddleware ? [clearingMiddleware] : []),
+          ...(summaryMiddleware ? [summaryMiddleware.agentMiddleware] : []),
+        ],
       });
 
       return new AgentRuntime(

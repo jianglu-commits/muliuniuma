@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import type { FakeChatInput, ToolSpec } from '@langchain/core/utils/testing';
+import { AIMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 import type { CallbackManagerForLLMRun } from '@langchain/core/callbacks/manager';
@@ -70,6 +71,7 @@ class RecordingChatModel extends FakeListChatModel {
   constructor(
     params: FakeChatInput,
     private readonly recorder: BaseMessage[][],
+    private readonly bound: string[][] = [],
   ) {
     super(params);
   }
@@ -86,6 +88,7 @@ class RecordingChatModel extends FakeListChatModel {
   override bindTools(
     tools: (StructuredTool | ToolSpec)[],
   ): ReturnType<FakeListChatModel['bindTools']> {
+    this.bound.push(tools.map((t) => ('name' in t ? String(t.name) : '?')));
     return this.withConfig({});
   }
 }
@@ -273,7 +276,11 @@ describe('mergeToolGroups', () => {
   });
 });
 
-function makeConfig(root: string, checkpointDb?: string): AppConfig {
+function makeConfig(
+  root: string,
+  checkpointDb?: string,
+  extra: Record<string, string> = {},
+): AppConfig {
   return loadConfig({
     LLM_PROVIDER: 'openai-compatible',
     LLM_MODEL: 'gpt-4o-mini',
@@ -284,6 +291,7 @@ function makeConfig(root: string, checkpointDb?: string): AppConfig {
     MCP_CONFIG: join(root, 'mcp.json'),
     A2A_PEERS: join(root, 'peers.json'),
     SANDBOX_ROOT: join(root, 'sandbox'),
+    ...extra,
   });
 }
 
@@ -717,5 +725,218 @@ describe('AgentRuntime', () => {
     expect(warn).toBeDefined();
     expect(warn).toContain('sandbox_exec');
     expect(warn).toContain('sandbox_exec_1');
+  });
+});
+
+const SKILL_TOOL_SOURCE = [
+  "import { tool } from 'langchain';",
+  "import { z } from 'zod';",
+  'export const tools = [',
+  '  tool(async ({ value }) => value, {',
+  "    name: 'echo',",
+  "    description: '回显',",
+  '    schema: z.object({ value: z.string() }),',
+  '  }),',
+  '];',
+  '',
+].join('\n');
+
+/** 按脚本逐轮发 tool_call，脚本用尽后收尾：在真实 ToolNode 路径上造出工具输出历史。 */
+class ToolTurnChatModel extends FakeListChatModel {
+  readonly seen: BaseMessage[][] = [];
+  private turns = 0;
+
+  constructor(
+    private readonly calls: { name: string; args: Record<string, string> }[],
+  ) {
+    super({ responses: [] } as FakeChatInput);
+  }
+
+  override async _generate(messages: BaseMessage[]): Promise<ChatResult> {
+    this.seen.push([...messages]);
+    const call = this.calls[this.turns];
+    this.turns += 1;
+    const message =
+      call === undefined
+        ? new AIMessage('好')
+        : new AIMessage({
+            content: '',
+            tool_calls: [{ name: call.name, args: call.args, id: `call-${this.turns}` }],
+          });
+    return { generations: [{ text: message.text, message }], llmOutput: {} };
+  }
+
+  override bindTools(
+    tools: (StructuredTool | ToolSpec)[],
+  ): ReturnType<FakeListChatModel['bindTools']> {
+    return this.withConfig({});
+  }
+}
+
+function toolTexts(messages: BaseMessage[]): string[] {
+  return messages
+    .filter((message) => message.getType() === 'tool')
+    .map((message) => String(message.content));
+}
+
+describe('工具加载与清理装配', () => {
+  let dir: string | undefined;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'tool-loading-'));
+    const skillDir = join(dir, 'skills', 'demo');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      ['---', 'name: demo', 'description: 演示', '---', '', '正文', ''].join('\n'),
+    );
+    await writeFile(join(skillDir, 'tool.ts'), SKILL_TOOL_SOURCE);
+  });
+
+  afterEach(async () => {
+    if (dir !== undefined) {
+      await rm(dir, { recursive: true, force: true });
+      dir = undefined;
+    }
+  });
+
+  it('工具少时选 eager 档，日志点名档位', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const runtime = await AgentRuntime.create(makeConfig(dir!), {
+      model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, []),
+    });
+    try {
+      expect(stderr.mock.calls.map((c) => String(c[0])).join('\n')).toContain('工具加载档位 eager');
+    } finally {
+      await runtime.dispose();
+      stderr.mockRestore();
+    }
+  });
+
+  it('eager 档不安装加载中间件，内置与 skill 工具直接绑定', async () => {
+    const bound: string[][] = [];
+    const runtime = await AgentRuntime.create(makeConfig(dir!), {
+      model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, [], bound),
+    });
+    try {
+      await runtime.run('你好', { threadId: 'wire-eager' });
+      const names = bound.at(-1) ?? [];
+      expect(names).toContain('sandbox_exec');
+      expect(names).toContain('load_skill');
+      expect(names).toContain('demo_echo');
+      expect(names).not.toContain('activate_tools');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('schema token 超 eager 预算时升档并注入 activate_tools', async () => {
+    const bound: string[][] = [];
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, { TOOL_LOADING_EAGER_MAX_TOKENS: '1' }),
+      { model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, [], bound) },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-catalog' });
+      const names = bound.at(-1) ?? [];
+      expect(names).toContain('activate_tools');
+      expect(names).not.toContain('demo_echo');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('TOOL_LOADING_ENABLED=false 时即使超预算也不注入元工具', async () => {
+    const bound: string[][] = [];
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_LOADING_ENABLED: 'false',
+        TOOL_LOADING_EAGER_MAX_TOKENS: '1',
+      }),
+      { model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, [], bound) },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-off' });
+      const names = bound.at(-1) ?? [];
+      expect(names).not.toContain('activate_tools');
+      expect(names).toContain('demo_echo');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('默认安装清理中间件：超阈值时模型看到的旧工具输出被换成占位符', async () => {
+    const model = new ToolTurnChatModel([
+      { name: 'demo_echo', args: { value: '测'.repeat(200) } },
+      { name: 'demo_echo', args: { value: '尾' } },
+    ]);
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_CLEARING_TRIGGER_TOKENS: '100',
+        TOOL_CLEARING_KEEP_MESSAGES: '1',
+      }),
+      { model },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-clear-on' });
+      const seen = toolTexts(model.seen.at(-1) ?? []);
+      expect(seen).toContain('[已清理的工具输出]');
+      expect(seen).toContain('尾');
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('TOOL_CLEARING_ENABLED=false 时不安装清理中间件，原文照旧进模型', async () => {
+    const model = new ToolTurnChatModel([
+      { name: 'demo_echo', args: { value: '测'.repeat(200) } },
+      { name: 'demo_echo', args: { value: '尾' } },
+    ]);
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_CLEARING_ENABLED: 'false',
+        TOOL_CLEARING_TRIGGER_TOKENS: '100',
+        TOOL_CLEARING_KEEP_MESSAGES: '1',
+      }),
+      { model },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-clear-off' });
+      const seen = toolTexts(model.seen.at(-1) ?? []);
+      expect(seen).not.toContain('[已清理的工具输出]');
+      expect(seen).toContain('测'.repeat(200));
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it('清理在加载内层：schema token 只数过滤后的绑定集', async () => {
+    // 可延迟工具描述 2000 个中文字符 ≈ 2044 token，升 catalog 档后被过滤掉。
+    // 内层口径 ≈ 常驻 340 + 消息 42 = 382；外层（顺序反了）会多算 2044 → 2426。
+    // 阈值 1200 落在两者之间：只有清理真的在加载内层才不该触发。
+    await writeFile(
+      join(dir!, 'skills', 'demo', 'tool.ts'),
+      SKILL_TOOL_SOURCE.replace("description: '回显'", `description: '${'测'.repeat(2000)}'`),
+    );
+    const model = new ToolTurnChatModel([
+      { name: 'load_skill', args: { name: 'demo' } },
+      { name: 'load_skill', args: { name: 'demo' } },
+    ]);
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_LOADING_EAGER_MAX_TOKENS: '1',
+        TOOL_CLEARING_TRIGGER_TOKENS: '1200',
+        TOOL_CLEARING_KEEP_MESSAGES: '1',
+      }),
+      { model },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-order' });
+      const seen = toolTexts(model.seen.at(-1) ?? []);
+      expect(seen).toHaveLength(2);
+      expect(seen).not.toContain('[已清理的工具输出]');
+    } finally {
+      await runtime.dispose();
+    }
   });
 });
