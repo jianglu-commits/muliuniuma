@@ -30,6 +30,18 @@ const EnvSchema = z.object({
   SUMMARY_KEEP_TOKENS: z.coerce.number().int().positive().default(2000),
   SUMMARY_TRIM_TOKENS: z.coerce.number().int().positive().default(8000),
 
+  TOOL_LOADING_ENABLED: z.enum(['true', 'false']).default('true'),
+  TOOL_LOADING_EAGER_MAX_TOOLS: z.coerce.number().int().positive().default(12),
+  TOOL_LOADING_EAGER_MAX_TOKENS: z.coerce.number().int().positive().default(1500),
+  TOOL_LOADING_CATALOG_MAX_TOOLS: z.coerce.number().int().positive().default(40),
+  TOOL_LOADING_CATALOG_MAX_TOKENS: z.coerce.number().int().positive().default(4000),
+  TOOL_LOADING_SEARCH_TOP_K: z.coerce.number().int().positive().default(8),
+  TOOL_LOADING_MAX_ACTIVE: z.coerce.number().int().positive().default(24),
+
+  TOOL_CLEARING_ENABLED: z.enum(['true', 'false']).default('true'),
+  TOOL_CLEARING_TRIGGER_TOKENS: z.coerce.number().int().positive().default(6000),
+  TOOL_CLEARING_KEEP_MESSAGES: z.coerce.number().int().positive().default(3),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'silent']).default('info'),
 });
 
@@ -62,6 +74,20 @@ export interface AppConfig {
     keepTokens: number;
     trimTokens: number;
   };
+  toolLoading: {
+    enabled: boolean;
+    eagerMaxTools: number;
+    eagerMaxTokens: number;
+    catalogMaxTools: number;
+    catalogMaxTokens: number;
+    searchTopK: number;
+    maxActiveTools: number;
+  };
+  toolClearing: {
+    enabled: boolean;
+    triggerTokens: number;
+    keepMessages: number;
+  };
   logLevel: LogLevel;
 }
 
@@ -78,6 +104,18 @@ export function loadConfig(
   }
 
   const v = parsed.data;
+
+  // eager 是 catalog 的子集，上限反了会让 catalog 档永远选不中。
+  if (v.TOOL_LOADING_EAGER_MAX_TOOLS > v.TOOL_LOADING_CATALOG_MAX_TOOLS) {
+    throw new ConfigError(
+      `环境变量校验失败 → TOOL_LOADING_EAGER_MAX_TOOLS(${v.TOOL_LOADING_EAGER_MAX_TOOLS}) 不得大于 TOOL_LOADING_CATALOG_MAX_TOOLS(${v.TOOL_LOADING_CATALOG_MAX_TOOLS})`,
+    );
+  }
+  if (v.TOOL_LOADING_EAGER_MAX_TOKENS > v.TOOL_LOADING_CATALOG_MAX_TOKENS) {
+    throw new ConfigError(
+      `环境变量校验失败 → TOOL_LOADING_EAGER_MAX_TOKENS(${v.TOOL_LOADING_EAGER_MAX_TOKENS}) 不得大于 TOOL_LOADING_CATALOG_MAX_TOKENS(${v.TOOL_LOADING_CATALOG_MAX_TOKENS})`,
+    );
+  }
 
   return {
     model: {
@@ -107,6 +145,20 @@ export function loadConfig(
       triggerTokens: v.SUMMARY_TRIGGER_TOKENS,
       keepTokens: v.SUMMARY_KEEP_TOKENS,
       trimTokens: v.SUMMARY_TRIM_TOKENS,
+    },
+    toolLoading: {
+      enabled: v.TOOL_LOADING_ENABLED === 'true',
+      eagerMaxTools: v.TOOL_LOADING_EAGER_MAX_TOOLS,
+      eagerMaxTokens: v.TOOL_LOADING_EAGER_MAX_TOKENS,
+      catalogMaxTools: v.TOOL_LOADING_CATALOG_MAX_TOOLS,
+      catalogMaxTokens: v.TOOL_LOADING_CATALOG_MAX_TOKENS,
+      searchTopK: v.TOOL_LOADING_SEARCH_TOP_K,
+      maxActiveTools: v.TOOL_LOADING_MAX_ACTIVE,
+    },
+    toolClearing: {
+      enabled: v.TOOL_CLEARING_ENABLED === 'true',
+      triggerTokens: v.TOOL_CLEARING_TRIGGER_TOKENS,
+      keepMessages: v.TOOL_CLEARING_KEEP_MESSAGES,
     },
     logLevel: v.LOG_LEVEL,
   };

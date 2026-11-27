@@ -271,3 +271,74 @@ describe('loadConfig 默认参数（读取真实 process.env）', () => {
     expect(config.summary.trimTokens).toBe(8000);
   });
 });
+
+describe('工具加载与清理配置', () => {
+  it('默认值', () => {
+    const config = loadConfig({ ...BASE });
+    expect(config.toolLoading).toEqual({
+      enabled: true,
+      eagerMaxTools: 12,
+      eagerMaxTokens: 1500,
+      catalogMaxTools: 40,
+      catalogMaxTokens: 4000,
+      searchTopK: 8,
+      maxActiveTools: 24,
+    });
+    expect(config.toolClearing).toEqual({
+      enabled: true,
+      triggerTokens: 6000,
+      keepMessages: 3,
+    });
+  });
+
+  it('TOOL_LOADING_ENABLED=false 被解析为关闭而非开启', () => {
+    expect(loadConfig({ ...BASE, TOOL_LOADING_ENABLED: 'false' }).toolLoading.enabled).toBe(false);
+  });
+
+  it('TOOL_CLEARING_ENABLED=false 被解析为关闭而非开启', () => {
+    expect(loadConfig({ ...BASE, TOOL_CLEARING_ENABLED: 'false' }).toolClearing.enabled).toBe(false);
+  });
+
+  it('数值变量可覆盖', () => {
+    const config = loadConfig({
+      ...BASE,
+      TOOL_LOADING_EAGER_MAX_TOOLS: '3',
+      TOOL_LOADING_SEARCH_TOP_K: '2',
+      TOOL_CLEARING_KEEP_MESSAGES: '5',
+    });
+    expect(config.toolLoading.eagerMaxTools).toBe(3);
+    expect(config.toolLoading.searchTopK).toBe(2);
+    expect(config.toolClearing.keepMessages).toBe(5);
+  });
+
+  it('非正数被拒绝并指出变量名', () => {
+    for (const key of [
+      'TOOL_LOADING_EAGER_MAX_TOOLS',
+      'TOOL_LOADING_EAGER_MAX_TOKENS',
+      'TOOL_LOADING_CATALOG_MAX_TOOLS',
+      'TOOL_LOADING_CATALOG_MAX_TOKENS',
+      'TOOL_LOADING_SEARCH_TOP_K',
+      'TOOL_LOADING_MAX_ACTIVE',
+      'TOOL_CLEARING_TRIGGER_TOKENS',
+      'TOOL_CLEARING_KEEP_MESSAGES',
+    ]) {
+      expect(() => loadConfig({ ...BASE, [key]: '0' })).toThrow(key);
+    }
+  });
+
+  it('eager 条数上限大于 catalog 条数上限时启动报错', () => {
+    expect(() => loadConfig({
+      ...BASE,
+      TOOL_LOADING_EAGER_MAX_TOOLS: '50',
+      TOOL_LOADING_CATALOG_MAX_TOOLS: '40',
+    })).toThrow(/TOOL_LOADING_EAGER_MAX_TOOLS/);
+  });
+
+  it('eager token 上限大于 catalog token 上限时启动报错', () => {
+    expect(() => loadConfig({
+      ...BASE,
+      TOOL_LOADING_EAGER_MAX_TOKENS: '5000',
+      TOOL_LOADING_CATALOG_MAX_TOKENS: '4000',
+    })).toThrow(/TOOL_LOADING_EAGER_MAX_TOKENS/);
+  });
+});
