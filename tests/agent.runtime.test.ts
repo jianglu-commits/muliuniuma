@@ -865,6 +865,25 @@ describe('工具加载与清理装配', () => {
     }
   });
 
+  it('TOOL_LOADING_ENABLED=false 时日志点名已关闭，不谎称档位 eager', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_LOADING_ENABLED: 'false',
+        TOOL_LOADING_EAGER_MAX_TOKENS: '1',
+      }),
+      { model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, []) },
+    );
+    try {
+      const logs = stderr.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(logs).toMatch(/工具加载已关闭：全量绑定（可延迟工具 1 个 \/ \d+ token）/);
+      expect(logs).not.toContain('档位 eager');
+    } finally {
+      await runtime.dispose();
+      stderr.mockRestore();
+    }
+  });
+
   it('默认安装清理中间件：超阈值时模型看到的旧工具输出被换成占位符', async () => {
     const model = new ToolTurnChatModel([
       { name: 'demo_echo', args: { value: '测'.repeat(200) } },

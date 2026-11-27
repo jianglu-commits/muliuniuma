@@ -158,8 +158,11 @@ export class AgentRuntime {
             })
           : undefined;
       if (toolLoadingMiddleware === undefined) {
+        // 关闭开关与真 eager 档都是全量绑定，但归因不同：文案不能把「已关闭」说成「档位 eager」。
         agentLogger.info(
-          `工具加载档位 eager：可延迟工具 ${deferrable.length} 个 / ${deferrableTokens} token，全量绑定`,
+          toolLoadingPolicy.enabled
+            ? `工具加载档位 eager：可延迟工具 ${deferrable.length} 个 / ${deferrableTokens} token，全量绑定`
+            : `工具加载已关闭：全量绑定（可延迟工具 ${deferrable.length} 个 / ${deferrableTokens} token）`,
         );
       }
 
