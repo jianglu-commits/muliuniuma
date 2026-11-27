@@ -63,9 +63,9 @@ class RecordingModel extends FakeListChatModel {
   }
 }
 
-function build(model: RecordingModel, deferrable: StructuredToolInterface[]) {
+function build(model: RecordingModel, deferrable: StructuredToolInterface[], tier: 'catalog' | 'search' = 'catalog') {
   const middleware = createToolLoadingMiddleware({
-    tier: 'catalog',
+    tier,
     deferrable,
     alwaysOn: ['always_on'],
     policy: POLICY,
@@ -199,5 +199,56 @@ describe('catalog 档加载中间件', () => {
     const agent = build(model, [dummy('t1')]);
     await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 'i' } });
     expect(model.systemTexts[0]).toContain('尚未激活');
+  });
+});
+
+describe('search 档加载中间件', () => {
+  const deferrable = [
+    dummy('fs_read_file', '读取沙箱里的文件内容'),
+    dummy('fs_write_file', '往沙箱写入文本文件'),
+    dummy('ask_remote', '调用远端 agent 协作'),
+  ];
+
+  it('绑定 search_tools 与 activate_tools', async () => {
+    const model = new RecordingModel();
+    const agent = build(model, deferrable, 'search');
+    await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's1' } });
+    expect(model.boundNames[0]).toContain('search_tools');
+    expect(model.boundNames[0]).toContain('activate_tools');
+  });
+
+  it('系统提示不列工具目录，只给数量与检索指引', async () => {
+    const model = new RecordingModel();
+    const agent = build(model, deferrable, 'search');
+    await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's2' } });
+    const system = model.systemTexts[0] ?? '';
+    expect(system).not.toContain('fs_read_file');
+    expect(system).toContain('3');
+    expect(system).toContain('search_tools');
+  });
+
+  it('search_tools 返回候选但不自动激活', async () => {
+    const model = new RecordingModel({ name: 'search_tools', args: { query: '写入' } });
+    const agent = build(model, deferrable, 'search');
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's3' } });
+    const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('fs_write_file');
+    expect(model.boundNames.at(-1)).not.toContain('fs_write_file');
+  });
+
+  it('检索无匹配时给出可执行的下一步', async () => {
+    const model = new RecordingModel({ name: 'search_tools', args: { query: 'zzzznotfound' } });
+    const agent = build(model, deferrable, 'search');
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's4' } });
+    const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('无匹配');
+    expect(texts).toContain('activate_tools');
+  });
+
+  it('检索后再激活即可绑定', async () => {
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['fs_write_file'] } });
+    const agent = build(model, deferrable, 'search');
+    await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's5' } });
+    expect(model.boundNames.at(-1)).toContain('fs_write_file');
   });
 });

@@ -6,13 +6,16 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { Logger } from '../shared/index.js';
 import {
   ACTIVATE_TOOL_NAME,
+  SEARCH_TOOL_NAME,
+  briefDescription,
   isNamedTool,
   renderCatalog,
+  searchCatalog,
 } from './tool-catalog.js';
 import type { ToolLoadingPolicy } from './tool-catalog.js';
 
 export interface ToolLoadingOptions {
-  tier: 'catalog';
+  tier: 'catalog' | 'search';
   deferrable: StructuredToolInterface[];
   alwaysOn: string[];
   policy: ToolLoadingPolicy;
@@ -56,21 +59,47 @@ function createActivateTool(
   );
 }
 
+function createSearchTool(
+  deferrable: StructuredToolInterface[],
+  topK: number,
+): StructuredToolInterface {
+  return tool(
+    ({ query }) => {
+      const matches = searchCatalog(deferrable, query, topK);
+      if (matches.length === 0) {
+        return `无匹配，请换个说法或用 ${ACTIVATE_TOOL_NAME} 直接指定名字。`;
+      }
+      return [
+        `候选工具（尚未激活，需要用 ${ACTIVATE_TOOL_NAME} 激活后才能调用）:`,
+        ...matches.map((m) => `- ${m.name}: ${briefDescription(m.description)}`),
+      ].join('\n');
+    },
+    {
+      name: SEARCH_TOOL_NAME,
+      description: '按关键词检索可用工具，返回候选名字与简介。检索本身不会激活工具。',
+      schema: z.object({ query: z.string().min(1) }),
+    },
+  );
+}
+
 export function createToolLoadingMiddleware(
   options: ToolLoadingOptions,
 ): ReturnType<typeof createMiddleware> {
-  const { deferrable, alwaysOn, policy, logger } = options;
+  const { tier, deferrable, alwaysOn, policy, logger } = options;
   const deferrableNames = new Set(deferrable.map((t) => t.name));
   const maxActive = policy.maxActiveTools;
 
   const resident = new Set<string>(alwaysOn);
   const activate = createActivateTool(deferrableNames, resident, maxActive);
-  const metaTools = [activate];
+  const middlewareTools =
+    tier === 'search'
+      ? [createSearchTool(deferrable, policy.searchTopK), activate]
+      : [activate];
   // 常驻名单从实际注册的 meta 工具推导（Set 按引用被闭包捕获），与 tools 列表不会漂移。
-  for (const meta of metaTools) resident.add(meta.name);
+  for (const meta of middlewareTools) resident.add(meta.name);
 
   logger.info(
-    `工具加载档位 catalog：可延迟工具 ${deferrable.length} 个，激活上限 ${maxActive}`,
+    `工具加载档位 ${tier}：可延迟工具 ${deferrable.length} 个，激活上限 ${maxActive}`,
   );
 
   return createMiddleware({
@@ -85,15 +114,19 @@ export function createToolLoadingMiddleware(
         },
       }),
     }),
-    tools: metaTools,
+    tools: middlewareTools,
     wrapModelCall: (request, handler) => {
       const active = new Set(request.state.activatedTools);
       const tools = request.tools.filter(
         (item) => !isNamedTool(item) || resident.has(item.name) || active.has(item.name),
       );
       const listed = [...active];
+      const guide =
+        tier === 'search'
+          ? `共有 ${deferrable.length} 个工具可用，目录未列出。用 ${SEARCH_TOOL_NAME} 按关键词检索候选，再用 ${ACTIVATE_TOOL_NAME} 激活。`
+          : renderCatalog(deferrable);
       const sections = [
-        renderCatalog(deferrable),
+        guide,
         listed.length > 0
           ? `当前已激活工具：${listed.join('、')}`
           : '当前尚未激活任何工具。',
