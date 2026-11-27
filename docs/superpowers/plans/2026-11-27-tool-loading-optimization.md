@@ -709,7 +709,7 @@ git commit -m "feat: add tool loading and clearing configuration"
 **Interfaces:**
 - Consumes: Task 1/2 的 `ToolLoadingPolicy`、`ToolTier`、`renderCatalog`、`isNamedTool`、`ACTIVATE_TOOL_NAME`、`SEARCH_TOOL_NAME`
 - Produces:
-  - `interface ToolLoadingOptions { tier: 'catalog' | 'search'; deferrable: StructuredToolInterface[]; alwaysOn: string[]; policy: ToolLoadingPolicy; logger: Logger }`
+  - `interface ToolLoadingOptions { tier: 'catalog'; deferrable: StructuredToolInterface[]; alwaysOn: string[]; policy: ToolLoadingPolicy; logger: Logger }`（Task 5 才放宽为 `'catalog' | 'search'`）
   - `createToolLoadingMiddleware(options: ToolLoadingOptions): ReturnType<typeof createMiddleware>`
 
 本任务只实现 `catalog` 档：`ToolLoadingOptions['tier']` 的类型就是字面量 `'catalog'`。Task 5 才把它放宽为 `'catalog' | 'search'` 并加 `search_tools`。本任务不要为 search 档预留分支或占位注释。
