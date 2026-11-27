@@ -226,6 +226,16 @@ describe('loadConfig 默认参数（读取真实 process.env）', () => {
     'SUMMARY_TRIGGER_TOKENS',
     'SUMMARY_KEEP_TOKENS',
     'SUMMARY_TRIM_TOKENS',
+    'TOOL_LOADING_ENABLED',
+    'TOOL_LOADING_EAGER_MAX_TOOLS',
+    'TOOL_LOADING_EAGER_MAX_TOKENS',
+    'TOOL_LOADING_CATALOG_MAX_TOOLS',
+    'TOOL_LOADING_CATALOG_MAX_TOKENS',
+    'TOOL_LOADING_SEARCH_TOP_K',
+    'TOOL_LOADING_MAX_ACTIVE',
+    'TOOL_CLEARING_ENABLED',
+    'TOOL_CLEARING_TRIGGER_TOKENS',
+    'TOOL_CLEARING_KEEP_MESSAGES',
     'LOG_LEVEL',
   ];
 
@@ -269,6 +279,20 @@ describe('loadConfig 默认参数（读取真实 process.env）', () => {
     expect(config.summary.triggerTokens).toBe(8000);
     expect(config.summary.keepTokens).toBe(2000);
     expect(config.summary.trimTokens).toBe(8000);
+    expect(config.toolLoading).toEqual({
+      enabled: true,
+      eagerMaxTools: 12,
+      eagerMaxTokens: 1500,
+      catalogMaxTools: 40,
+      catalogMaxTokens: 4000,
+      searchTopK: 8,
+      maxActiveTools: 24,
+    });
+    expect(config.toolClearing).toEqual({
+      enabled: true,
+      triggerTokens: 6000,
+      keepMessages: 3,
+    });
   });
 });
 
@@ -322,23 +346,82 @@ describe('工具加载与清理配置', () => {
       'TOOL_CLEARING_TRIGGER_TOKENS',
       'TOOL_CLEARING_KEEP_MESSAGES',
     ]) {
-      expect(() => loadConfig({ ...BASE, [key]: '0' })).toThrow(key);
+      // 钉 zod 解析路径的 `KEY: ` 前缀：交叉约束文案写作 KEY(value) 不带冒号，纯子串匹配会被它冒名顶替。
+      expect(() => loadConfig({ ...BASE, [key]: '0' })).toThrow(`${key}: `);
     }
   });
 
   it('eager 条数上限大于 catalog 条数上限时启动报错', () => {
-    expect(() => loadConfig({
-      ...BASE,
-      TOOL_LOADING_EAGER_MAX_TOOLS: '50',
-      TOOL_LOADING_CATALOG_MAX_TOOLS: '40',
-    })).toThrow(/TOOL_LOADING_EAGER_MAX_TOOLS/);
+    const run = (): void => {
+      loadConfig({
+        ...BASE,
+        TOOL_LOADING_EAGER_MAX_TOOLS: '50',
+        TOOL_LOADING_CATALOG_MAX_TOOLS: '40',
+      });
+    };
+
+    expect(run).toThrowError(/TOOL_LOADING_EAGER_MAX_TOOLS/);
+    expect(run).toThrowError(ConfigError);
+
+    const error = captureError(run);
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as ConfigError).code).toBe('CONFIG_INVALID');
+    expect((error as Error).message).toMatch(/TOOL_LOADING_CATALOG_MAX_TOOLS/);
   });
 
   it('eager token 上限大于 catalog token 上限时启动报错', () => {
-    expect(() => loadConfig({
+    const run = (): void => {
+      loadConfig({
+        ...BASE,
+        TOOL_LOADING_EAGER_MAX_TOKENS: '5000',
+        TOOL_LOADING_CATALOG_MAX_TOKENS: '4000',
+      });
+    };
+
+    expect(run).toThrowError(/TOOL_LOADING_EAGER_MAX_TOKENS/);
+    expect(run).toThrowError(ConfigError);
+
+    const error = captureError(run);
+    expect(error).toBeInstanceOf(ConfigError);
+    expect((error as ConfigError).code).toBe('CONFIG_INVALID');
+    expect((error as Error).message).toMatch(/TOOL_LOADING_CATALOG_MAX_TOKENS/);
+  });
+
+  it('eager 条数上限等于 catalog 条数上限时合法（约束是 <= 而非 <）', () => {
+    const config = loadConfig({
       ...BASE,
-      TOOL_LOADING_EAGER_MAX_TOKENS: '5000',
+      TOOL_LOADING_EAGER_MAX_TOOLS: '40',
+      TOOL_LOADING_CATALOG_MAX_TOOLS: '40',
+    });
+    expect(config.toolLoading.eagerMaxTools).toBe(40);
+    expect(config.toolLoading.catalogMaxTools).toBe(40);
+  });
+
+  it('eager token 上限等于 catalog token 上限时合法（约束是 <= 而非 <）', () => {
+    const config = loadConfig({
+      ...BASE,
+      TOOL_LOADING_EAGER_MAX_TOKENS: '4000',
       TOOL_LOADING_CATALOG_MAX_TOKENS: '4000',
-    })).toThrow(/TOOL_LOADING_EAGER_MAX_TOKENS/);
+    });
+    expect(config.toolLoading.eagerMaxTokens).toBe(4000);
+    expect(config.toolLoading.catalogMaxTokens).toBe(4000);
+  });
+
+  it('TOOL_LOADING_ENABLED 只接受 true / false', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, TOOL_LOADING_ENABLED: 'yes' });
+    };
+
+    expect(run).toThrowError(/TOOL_LOADING_ENABLED/);
+    expect(run).toThrowError(ConfigError);
+  });
+
+  it('TOOL_CLEARING_ENABLED 只接受 true / false', () => {
+    const run = (): void => {
+      loadConfig({ ...BASE, TOOL_CLEARING_ENABLED: 'yes' });
+    };
+
+    expect(run).toThrowError(/TOOL_CLEARING_ENABLED/);
+    expect(run).toThrowError(ConfigError);
   });
 });
