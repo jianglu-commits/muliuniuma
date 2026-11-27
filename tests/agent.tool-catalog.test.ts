@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { tool } from 'langchain';
 import { z } from 'zod';
 import type { StructuredToolInterface } from '@langchain/core/tools';
-import { estimateToolTokens, isNamedTool, selectTier } from '../src/agent/index.js';
+import {
+  briefDescription,
+  CATALOG_DESC_LIMIT,
+  estimateToolTokens,
+  isNamedTool,
+  renderCatalog,
+  searchCatalog,
+  selectTier,
+  tokenize,
+} from '../src/agent/index.js';
 import type { ToolLoadingPolicy } from '../src/agent/index.js';
 
 const POLICY: ToolLoadingPolicy = {
@@ -96,5 +105,106 @@ describe('isNamedTool', () => {
 
   it('有 name 但非 Runnable 的普通对象不被判为具名工具', () => {
     expect(isNamedTool({ name: 'x', schema: {} })).toBe(false);
+  });
+});
+
+describe('briefDescription', () => {
+  it('只取首行', () => {
+    expect(briefDescription('第一行\n第二行')).toBe('第一行');
+  });
+
+  it('超长截断并补省略号', () => {
+    const long = '测'.repeat(200);
+    const brief = briefDescription(long);
+    expect(brief).toBe(`${'测'.repeat(CATALOG_DESC_LIMIT)}…`);
+  });
+
+  it('恰好等于上限时不加省略号', () => {
+    const exact = '测'.repeat(CATALOG_DESC_LIMIT);
+    expect(briefDescription(exact)).toBe(exact);
+  });
+
+  it('空描述返回空串', () => {
+    expect(briefDescription('')).toBe('');
+  });
+});
+
+describe('renderCatalog', () => {
+  it('空工具集返回空串', () => {
+    expect(renderCatalog([])).toBe('');
+  });
+
+  it('每个工具一行，含名字与截断后的描述', () => {
+    const catalog = renderCatalog([makeTool('fs_read', '读取文件')]);
+    expect(catalog).toContain('- fs_read: 读取文件');
+  });
+
+  it('长描述被截断，目录体积不随描述线性膨胀', () => {
+    const catalog = renderCatalog([makeTool('t', '测'.repeat(500))]);
+    expect(catalog).toContain('…');
+    expect(catalog.length).toBeLessThan(200);
+  });
+
+  it('提示里点名 activate_tools', () => {
+    expect(renderCatalog([makeTool('t', 'd')])).toContain('activate_tools');
+  });
+});
+
+describe('tokenize', () => {
+  it('ASCII 按单词切并转小写', () => {
+    expect(tokenize('Read_File NOW')).toEqual(['read', 'file', 'now']);
+  });
+
+  it('CJK 产出单字与相邻二字', () => {
+    expect(tokenize('读文件')).toEqual(['读', '读文', '文', '文件', '件']);
+  });
+
+  it('中英混合分别切', () => {
+    expect(tokenize('读file')).toEqual(['读', 'file']);
+  });
+
+  it('空串返回空数组', () => {
+    expect(tokenize('')).toEqual([]);
+  });
+});
+
+describe('searchCatalog', () => {
+  const tools = [
+    makeTool('fs_read_file', '读取沙箱里的文件内容'),
+    makeTool('fs_write_file', '往沙箱写入文本文件'),
+    makeTool('ask_remote', '调用远端 agent 协作'),
+  ];
+
+  it('中文关键词能召回对应工具', () => {
+    const hits = searchCatalog(tools, '写入', 8);
+    expect(hits[0]?.name).toBe('fs_write_file');
+  });
+
+  it('名字命中权重高于描述命中', () => {
+    const hits = searchCatalog(tools, 'read', 8);
+    expect(hits[0]?.name).toBe('fs_read_file');
+  });
+
+  it('无匹配返回空数组', () => {
+    expect(searchCatalog(tools, 'zzzznotfound', 8)).toEqual([]);
+  });
+
+  it('空 query 返回空数组', () => {
+    expect(searchCatalog(tools, '', 8)).toEqual([]);
+  });
+
+  it('topK 截断结果条数', () => {
+    expect(searchCatalog(tools, 'file', 1)).toHaveLength(1);
+  });
+
+  it('返回完整描述而非截断描述', () => {
+    const long = makeTool('t_long', `${'前置说明'.repeat(30)}关键词尾巴`);
+    const hits = searchCatalog([long], '关键词尾巴', 8);
+    expect(hits[0]?.description).toBe(long.description);
+  });
+
+  it('同分时按名字排序，结果稳定', () => {
+    const same = [makeTool('b_tool', '共同描述'), makeTool('a_tool', '共同描述')];
+    expect(searchCatalog(same, '共同描述', 8).map((m) => m.name)).toEqual(['a_tool', 'b_tool']);
   });
 });
