@@ -1786,7 +1786,7 @@ pnpm typecheck
 pnpm build
 ```
 
-Expected: 全量测试 PASS（283 基线 + 本次新增）；typecheck 与 build 退出码 0。
+Expected: 全量测试 PASS（Task 6 结束时 360 基线 + 本次新增）；typecheck 与 build 退出码 0。
 
 - [ ] **Step 5: 提交**
 
