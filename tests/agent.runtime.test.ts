@@ -741,13 +741,27 @@ const SKILL_TOOL_SOURCE = [
   '',
 ].join('\n');
 
+/** skill 名 activate + 工具名 tools → 静态工具名恰好是 activate_tools，与元工具撞名。 */
+const META_COLLISION_TOOL_SOURCE = [
+  "import { tool } from 'langchain';",
+  "import { z } from 'zod';",
+  'export const tools = [',
+  '  tool(async () => "同名 skill 工具的输出", {',
+  "    name: 'tools',",
+  "    description: '与元工具撞名的 skill 工具',",
+  '    schema: z.object({}),',
+  '  }),',
+  '];',
+  '',
+].join('\n');
+
 /** 按脚本逐轮发 tool_call，脚本用尽后收尾：在真实 ToolNode 路径上造出工具输出历史。 */
 class ToolTurnChatModel extends FakeListChatModel {
   readonly seen: BaseMessage[][] = [];
   private turns = 0;
 
   constructor(
-    private readonly calls: { name: string; args: Record<string, string> }[],
+    private readonly calls: { name: string; args: Record<string, unknown> }[],
     private readonly bound: string[][] = [],
   ) {
     super({ responses: [] } as FakeChatInput);
@@ -975,6 +989,74 @@ describe('工具加载与清理装配', () => {
     } finally {
       await runtime.dispose();
       stderr.mockRestore();
+    }
+  });
+
+  async function writeMetaCollisionSkill(): Promise<void> {
+    const skillDir = join(dir!, 'skills', 'activate');
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      ['---', 'name: activate', 'description: 与元工具撞名', '---', '', '正文', ''].join('\n'),
+    );
+    await writeFile(join(skillDir, 'tool.ts'), META_COLLISION_TOOL_SOURCE);
+  }
+
+  it('与元工具撞名的 skill 工具让位改名，activate_tools 仍写激活通道', async () => {
+    await writeMetaCollisionSkill();
+    const bound: string[][] = [];
+    const model = new ToolTurnChatModel(
+      [
+        { name: 'activate_tools', args: { names: ['activate_tools_1'] } },
+        { name: 'activate_tools_1', args: {} },
+      ],
+      bound,
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, { TOOL_LOADING_EAGER_MAX_TOKENS: '1' }),
+      { model },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-meta-collision' });
+      const seen = toolTexts(model.seen.at(-1) ?? []);
+      // 第一回合必须拿到真元工具的激活回执（写了激活通道），而不是撞名 skill 工具的输出。
+      expect(seen[0]).toContain('已激活：activate_tools_1');
+      // 改名后的 skill 工具激活后真能被调用，证明静态表与可延迟集都换成了代理。
+      expect(seen[1]).toBe('同名 skill 工具的输出');
+      expect(bound.at(-1) ?? []).toContain('activate_tools_1');
+      const systemText = (model.seen.at(-1) ?? [])
+        .filter((message) => message.getType() === 'system')
+        .map((message) => message.text)
+        .join('\n');
+      expect(systemText).toContain('- activate_tools_1:');
+      const logs = stderr.mock.calls.map((c) => String(c[0])).join('\n');
+      const warn = logs.split('\n').find((line) => line.includes('[warn] app:agent:'));
+      expect(warn).toContain('activate_tools');
+      expect(warn).toContain('activate_tools_1');
+    } finally {
+      await runtime.dispose();
+      stderr.mockRestore();
+    }
+  });
+
+  it('关闭工具加载时与元工具撞名的 skill 工具保留原名', async () => {
+    await writeMetaCollisionSkill();
+    const bound: string[][] = [];
+    const runtime = await AgentRuntime.create(
+      makeConfig(dir!, undefined, {
+        TOOL_LOADING_ENABLED: 'false',
+        TOOL_LOADING_EAGER_MAX_TOKENS: '1',
+      }),
+      { model: new RecordingChatModel({ responses: ['好'] } as FakeChatInput, [], bound) },
+    );
+    try {
+      await runtime.run('你好', { threadId: 'wire-meta-off' });
+      const names = bound.at(-1) ?? [];
+      expect(names).toContain('activate_tools');
+      expect(names).not.toContain('activate_tools_1');
+    } finally {
+      await runtime.dispose();
     }
   });
 });

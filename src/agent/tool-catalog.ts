@@ -44,7 +44,7 @@ export const CATALOG_DESC_LIMIT = 80;
 export function briefDescription(description: string): string {
   const firstLine = description.split('\n')[0] ?? '';
   const flat = firstLine.replace(/\s+/g, ' ').trim();
-  // 按码点截断：isCjk 覆盖扩展 B 区（U+20000 起），slice 的 UTF-16 口径会切出孤立代理对。
+  // 按码点截断：isCjk 覆盖扩展 B–H 区（U+20000 起），slice 的 UTF-16 口径会切出孤立代理对。
   const chars = [...flat];
   return chars.length > CATALOG_DESC_LIMIT
     ? `${chars.slice(0, CATALOG_DESC_LIMIT).join('')}…`

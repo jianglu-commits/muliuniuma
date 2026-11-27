@@ -5,6 +5,7 @@ import { createAgent } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { AIMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
+import type { StructuredToolInterface } from '@langchain/core/tools';
 import { START } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import type { AppConfig } from '../config/index.js';
@@ -16,7 +17,7 @@ import { SkillRegistry, createLoadSkillTool, loadSkills } from '../skills/index.
 import type { SkillManifest } from '../skills/index.js';
 import { McpHub } from '../mcp/index.js';
 import { A2AClientHub, createRemoteAgentTools } from '../a2a/index.js';
-import { createLogger } from '../shared/index.js';
+import { createLogger, renameTool } from '../shared/index.js';
 import type { Logger } from '../shared/index.js';
 import { mergeToolGroups } from './tools.js';
 import {
@@ -29,7 +30,12 @@ import type {
   SummaryOutcome,
   SummaryPolicy,
 } from './summary.js';
-import { estimateToolTokens, selectTier } from './tool-catalog.js';
+import {
+  ACTIVATE_TOOL_NAME,
+  SEARCH_TOOL_NAME,
+  estimateToolTokens,
+  selectTier,
+} from './tool-catalog.js';
 import type { ToolLoadingPolicy } from './tool-catalog.js';
 import { createToolLoadingMiddleware } from './tool-loading.js';
 import { createToolClearingMiddleware } from './context-clearing.js';
@@ -75,6 +81,33 @@ async function ignoreFailure(
   } catch (error) {
     logger.warn(`${label}清理失败，已忽略`, error);
   }
+}
+
+/**
+ * ToolNode 按名字取首个匹配且静态工具排在中间件工具之前：与元工具同名的静态工具会顶掉
+ * activate_tools/search_tools。改名须同时替换静态表与可延迟集，目录/检索/激活名单才一致。
+ */
+function reserveMetaToolNames(
+  tools: StructuredToolInterface[],
+  deferrable: StructuredToolInterface[],
+  logger: Logger,
+): { tools: StructuredToolInterface[]; deferrable: StructuredToolInterface[] } {
+  const used = new Set(tools.map((t) => t.name));
+  const renamed = new Map<StructuredToolInterface, StructuredToolInterface>();
+  for (const item of deferrable) {
+    if (item.name !== ACTIVATE_TOOL_NAME && item.name !== SEARCH_TOOL_NAME) continue;
+    let suffix = 1;
+    while (used.has(`${item.name}_${suffix}`)) suffix += 1;
+    const name = `${item.name}_${suffix}`;
+    used.add(name);
+    logger.warn(`工具名与元工具冲突：工具 "${item.name}" 已重命名为 "${name}"`);
+    renamed.set(item, renameTool(item, name));
+  }
+  if (renamed.size === 0) return { tools, deferrable };
+  return {
+    tools: tools.map((t) => renamed.get(t) ?? t),
+    deferrable: deferrable.map((t) => renamed.get(t) ?? t),
+  };
 }
 
 export class AgentRuntime {
@@ -147,16 +180,20 @@ export class AgentRuntime {
         0,
       );
       const tier = selectTier(deferrable.length, deferrableTokens, toolLoadingPolicy);
-      const toolLoadingMiddleware =
-        toolLoadingPolicy.enabled && tier !== 'eager'
-          ? createToolLoadingMiddleware({
-              tier,
-              deferrable,
-              alwaysOn,
-              policy: toolLoadingPolicy,
-              logger: agentLogger,
-            })
-          : undefined;
+      const installLoading = toolLoadingPolicy.enabled && tier !== 'eager';
+      // 仅在真要装中间件时让位元工具名：关闭/eager 档没有元工具，改名会破坏 SKILL.md 的调用名。
+      const reserved = installLoading
+        ? reserveMetaToolNames(tools, deferrable, agentLogger)
+        : { tools, deferrable };
+      const toolLoadingMiddleware = installLoading
+        ? createToolLoadingMiddleware({
+            tier,
+            deferrable: reserved.deferrable,
+            alwaysOn,
+            policy: toolLoadingPolicy,
+            logger: agentLogger,
+          })
+        : undefined;
       if (toolLoadingMiddleware === undefined) {
         // 关闭开关与真 eager 档都是全量绑定，但归因不同：文案不能把「已关闭」说成「档位 eager」。
         agentLogger.info(
@@ -185,7 +222,7 @@ export class AgentRuntime {
 
       const agent = createAgent({
         model,
-        tools,
+        tools: reserved.tools,
         systemPrompt: prompt,
         checkpointer,
         // 顺序有意义：数组首个是最外层 wrapModelCall，清理必须在加载内层才能看到过滤后的绑定集。
