@@ -152,6 +152,15 @@ describe('catalog 档加载中间件', () => {
     expect(result.messages.map((m) => String(m.content)).join('\n')).toContain('已常驻');
   });
 
+  it('激活元工具自身的名字也算已常驻', async () => {
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['activate_tools'] } });
+    const agent = build(model, [dummy('t1')]);
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 'j' } });
+    const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('已常驻');
+    expect(texts).not.toContain('未知工具名');
+  });
+
   it('尚未激活时系统提示明确说明', async () => {
     const model = new RecordingModel();
     const agent = build(model, [dummy('t1')]);

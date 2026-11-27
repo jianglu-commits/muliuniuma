@@ -6,7 +6,6 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { Logger } from '../shared/index.js';
 import {
   ACTIVATE_TOOL_NAME,
-  SEARCH_TOOL_NAME,
   isNamedTool,
   renderCatalog,
 } from './tool-catalog.js';
@@ -60,11 +59,14 @@ export function createToolLoadingMiddleware(
   options: ToolLoadingOptions,
 ): ReturnType<typeof createMiddleware> {
   const { deferrable, alwaysOn, policy, logger } = options;
-  const resident = new Set([...alwaysOn, ACTIVATE_TOOL_NAME, SEARCH_TOOL_NAME]);
   const deferrableNames = new Set(deferrable.map((t) => t.name));
   const maxActive = policy.maxActiveTools;
 
-  const activate = createActivateTool(deferrableNames, new Set(alwaysOn), maxActive);
+  const resident = new Set<string>(alwaysOn);
+  const activate = createActivateTool(deferrableNames, resident, maxActive);
+  const metaTools = [activate];
+  // 常驻名单从实际注册的 meta 工具推导（Set 按引用被闭包捕获），与 tools 列表不会漂移。
+  for (const meta of metaTools) resident.add(meta.name);
 
   logger.info(
     `工具加载档位 catalog：可延迟工具 ${deferrable.length} 个，激活上限 ${maxActive}`,
@@ -82,7 +84,7 @@ export function createToolLoadingMiddleware(
         },
       }),
     }),
-    tools: [activate],
+    tools: metaTools,
     wrapModelCall: (request, handler) => {
       const active = new Set(request.state.activatedTools);
       const tools = request.tools.filter(
