@@ -15,7 +15,8 @@
 | **A2A 互联** | 既能被别的 agent 调用（expose 卡片 + JSON-RPC），也能主动调远端 agent（自动获得 `ask_<name>` 工具） |
 | **多轮会话** | SQLite checkpointer 持久化，CLI 会话 id 与 A2A contextId 都直接当 thread_id |
 | **上下文压缩** | 历史超阈值时自动压成一条中文结构化摘要并保留最近原文，也可以随时输入 `/summarize` 手动收一收 |
-| **可测试** | 283 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
+| **工具加载优化** | 按工具条数与 schema token 三档选加载方式（全量 / 目录+按需激活 / 检索+按需激活），零额外 LLM 调用；旧工具输出在模型视图层清理，checkpoint 原文不动 |
+| **可测试** | 368 个用例覆盖全部非模型路径；MCP / A2A 用真实子进程与真实 HTTP 夹具，不用 mock 冒充 |
 
 ## 环境要求
 
@@ -99,6 +100,8 @@ REPL 里的对话是**多轮**的：整个会话共用一个 thread id，模型�
 - **不要与对话并发**。`/summarize` 与一次提问同时作用于同一会话时，后写者可能覆盖前者。
 
 想彻底关掉：`SUMMARY_ENABLED=false`。
+
+工具侧的 token 优化（三档加载工具 schema + 模型视图层清理旧工具输出）是独立的另一条轴，实现记录与 SDK 约束见根目录 [`readme-context-tool.md`](readme-context-tool.md)。
 
 ---
 
@@ -241,6 +244,16 @@ curl -s http://localhost:4124/ \
 | `SUMMARY_TRIGGER_TOKENS` | `8000` | 历史 token 估算达到该值时自动压缩（口径见「上下文压缩」） |
 | `SUMMARY_KEEP_TOKENS` | `2000` | 压缩时保留的最近原文 token 预算 |
 | `SUMMARY_TRIM_TOKENS` | `8000` | 单次送进摘要模型的 token 上限；**不得小于「触发阈值 − 保留预算」**，否则更早的历史既没保留也没进摘要 |
+| `TOOL_LOADING_ENABLED` | `true` | 工具加载分档总开关；`false` 时全量绑定（判据见 `readme-context-tool.md`） |
+| `TOOL_LOADING_EAGER_MAX_TOOLS` | `12` | 可延迟工具（skill / mcp / a2a）条数 ≤ 该值才可能走全量档 |
+| `TOOL_LOADING_EAGER_MAX_TOKENS` | `1500` | 可延迟工具 schema token ≤ 该值才可能走全量档 |
+| `TOOL_LOADING_CATALOG_MAX_TOOLS` | `40` | 条数 ≤ 该值才可能走目录档，否则检索档；**不得小于 `TOOL_LOADING_EAGER_MAX_TOOLS`** |
+| `TOOL_LOADING_CATALOG_MAX_TOKENS` | `4000` | schema token ≤ 该值才可能走目录档；**不得小于 `TOOL_LOADING_EAGER_MAX_TOKENS`** |
+| `TOOL_LOADING_SEARCH_TOP_K` | `8` | `search_tools` 返回候选上限 |
+| `TOOL_LOADING_MAX_ACTIVE` | `24` | 同时激活上限，超出按 FIFO 淘汰 |
+| `TOOL_CLEARING_ENABLED` | `true` | 工具输出清理开关（只削模型视图，checkpoint 原文不动） |
+| `TOOL_CLEARING_TRIGGER_TOKENS` | `6000` | 视图 token（含已绑定工具 schema）达到该值开始清理 |
+| `TOOL_CLEARING_KEEP_MESSAGES` | `3` | 保留最近 N 条工具输出不清 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `silent` |
 
 已存在的环境变量优先于 `.env` 文件内容——CI 里注入的 key 不会被 `.env` 覆盖。
@@ -387,7 +400,7 @@ export const tools = [
 
 ```
 src/
-├─ agent/      运行时装配（AgentRuntime）、工具合并、上下文压缩（summary / summary-prompt）
+├─ agent/      运行时装配（AgentRuntime）、工具合并、上下文压缩（summary / summary-prompt）、工具加载分档（tool-catalog / tool-loading）与输出清理（context-clearing）
 ├─ a2a/        A2A 卡片 / 消息 / executor / server / client / 远程工具
 ├─ config/     环境变量校验（loadConfig / loadEnvFileIfPresent）
 ├─ llm/        provider 注册表（createChatModel / registerProvider）
