@@ -1440,6 +1440,7 @@ Expected: FAIL —— 无法解析 `../src/agent/context-clearing.js`。
 
 ```ts
 import { ClearToolUsesEdit, createMiddleware } from 'langchain';
+import type { ContextEdit } from 'langchain';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { Logger } from '../shared/index.js';
 import { countMessageTokens } from './summary.js';
@@ -1462,7 +1463,9 @@ export function createToolClearingMiddleware(
   policy: ToolClearingPolicy,
   logger: Logger,
 ): ReturnType<typeof createMiddleware> {
-  const edit = new ClearToolUsesEdit({
+  // 经 ContextEdit 接口省略 model：它只服务 fraction 口径（本策略不用），
+  // 且 request.model 的 RunnableInterface 类型对不上 BaseLanguageModel。
+  const edit: ContextEdit = new ClearToolUsesEdit({
     trigger: { tokens: policy.triggerTokens },
     keep: { messages: policy.keepMessages },
     placeholder: CLEARED_PLACEHOLDER,
@@ -1482,7 +1485,6 @@ export function createToolClearingMiddleware(
 
       await edit.apply({
         messages,
-        model: request.model,
         countTokens: async (msgs: BaseMessage[]) => countMessageTokens(msgs) + schemaTokens,
       });
 
