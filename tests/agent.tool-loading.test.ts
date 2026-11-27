@@ -223,7 +223,9 @@ describe('search 档加载中间件', () => {
     await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's2' } });
     const system = model.systemTexts[0] ?? '';
     expect(system).not.toContain('fs_read_file');
-    expect(system).toContain('3');
+    expect(system).not.toContain('fs_write_file');
+    expect(system).not.toContain('ask_remote');
+    expect(system).toContain('共有 3 个');
     expect(system).toContain('search_tools');
   });
 
@@ -232,7 +234,11 @@ describe('search 档加载中间件', () => {
     const agent = build(model, deferrable, 'search');
     const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's3' } });
     const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('候选');
+    expect(texts).toContain('尚未激活');
     expect(texts).toContain('fs_write_file');
+    expect(texts).not.toContain('fs_read_file');
+    expect(texts).not.toContain('ask_remote');
     expect(model.boundNames.at(-1)).not.toContain('fs_write_file');
   });
 
@@ -250,5 +256,17 @@ describe('search 档加载中间件', () => {
     const agent = build(model, deferrable, 'search');
     await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, { configurable: { thread_id: 's5' } });
     expect(model.boundNames.at(-1)).toContain('fs_write_file');
+  });
+
+  it('激活 search_tools 自身的名字也算已常驻', async () => {
+    const model = new RecordingModel({ name: 'activate_tools', args: { names: ['search_tools'] } });
+    const agent = build(model, deferrable, 'search');
+    const config = { configurable: { thread_id: 's6' } };
+    const result = await agent.invoke({ messages: [{ role: 'human', content: '你好' }] }, config);
+    const texts = result.messages.map((m) => String(m.content)).join('\n');
+    expect(texts).toContain('已常驻，无需激活');
+    expect(texts).not.toContain('未知工具名');
+    const snapshot: { values: { activatedTools?: string[] } } = await agent.getState(config);
+    expect(snapshot.values.activatedTools).toEqual([]);
   });
 });
