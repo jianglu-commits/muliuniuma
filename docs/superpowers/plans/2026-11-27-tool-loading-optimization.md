@@ -1198,7 +1198,7 @@ pnpm vitest run tests/agent.tool-loading.test.ts
 pnpm typecheck
 ```
 
-Expected: 14 个用例 PASS；typecheck 退出码 0。
+Expected: 17 个用例 PASS（Task 4 修复后 12 条 + 本任务 5 条）；typecheck 退出码 0。
 
 - [ ] **Step 5: 提交**
 
