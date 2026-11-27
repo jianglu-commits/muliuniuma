@@ -82,6 +82,8 @@
   - `interface ToolLoadingPolicy { enabled: boolean; eagerMaxTools: number; eagerMaxTokens: number; catalogMaxTools: number; catalogMaxTokens: number; searchTopK: number; maxActiveTools: number }`
   - `estimateToolTokens(tool: StructuredToolInterface): number`
   - `selectTier(count: number, tokens: number, policy: ToolLoadingPolicy): ToolTier`
+  - `const ACTIVATE_TOOL_NAME = 'activate_tools'`、`const SEARCH_TOOL_NAME = 'search_tools'`（放这一层是为了让 `renderCatalog` 与加载中间件共用同一个常量，且不构成循环 import）
+  - `isNamedTool(value: object): value is StructuredToolInterface`（Task 4 与 Task 6 共用，避免逐字重复定义）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -92,7 +94,7 @@ import { describe, expect, it } from 'vitest';
 import { tool } from 'langchain';
 import { z } from 'zod';
 import type { StructuredToolInterface } from '@langchain/core/tools';
-import { estimateToolTokens, selectTier } from '../src/agent/tool-catalog.js';
+import { estimateToolTokens, isNamedTool, selectTier } from '../src/agent/tool-catalog.js';
 import type { ToolLoadingPolicy } from '../src/agent/tool-catalog.js';
 
 const POLICY: ToolLoadingPolicy = {
@@ -161,6 +163,16 @@ describe('selectTier', () => {
     expect(selectTier(0, 0, POLICY)).toBe('eager');
   });
 });
+
+describe('isNamedTool', () => {
+  it('真实工具被判为具名工具', () => {
+    expect(isNamedTool(makeTool('t', 'd'))).toBe(true);
+  });
+
+  it('provider dict（非 Runnable）不被判为具名工具', () => {
+    expect(isNamedTool({ type: 'tool_search' })).toBe(false);
+  });
+});
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -190,8 +202,12 @@ export function countTextTokens(text: string): number {
 
 ```ts
 import { toJsonSchema } from '@langchain/core/utils/json_schema';
+import { Runnable } from '@langchain/core/runnables';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { countTextTokens } from './summary.js';
+
+export const ACTIVATE_TOOL_NAME = 'activate_tools';
+export const SEARCH_TOOL_NAME = 'search_tools';
 
 export type ToolTier = 'eager' | 'catalog' | 'search';
 
@@ -219,6 +235,11 @@ export function selectTier(
   if (count <= policy.catalogMaxTools && tokens <= policy.catalogMaxTokens) return 'catalog';
   return 'search';
 }
+
+/** 区分客户端工具与 provider 原生工具 dict：后者没有 name/schema，不参与过滤与 token 估算。 */
+export function isNamedTool(value: object): value is StructuredToolInterface {
+  return 'name' in value && typeof value.name === 'string' && Runnable.isRunnable(value);
+}
 ```
 
 - [ ] **Step 5: 跑测试确认通过**
@@ -229,7 +250,7 @@ pnpm vitest run tests/agent.tool-catalog.test.ts
 pnpm typecheck
 ```
 
-Expected: 10 个用例 PASS；typecheck 退出码 0。
+Expected: 12 个用例 PASS；typecheck 退出码 0。
 
 - [ ] **Step 6: 提交**
 
@@ -397,7 +418,7 @@ export function briefDescription(description: string): string {
 export function renderCatalog(tools: StructuredToolInterface[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((t) => `- ${t.name}: ${briefDescription(t.description)}`);
-  return ['可激活工具（用 activate_tools 传入名字后才能调用）:', ...lines].join('\n');
+  return [`可激活工具（用 ${ACTIVATE_TOOL_NAME} 传入名字后才能调用）:`, ...lines].join('\n');
 }
 
 export function tokenize(text: string): string[] {
@@ -479,7 +500,7 @@ pnpm vitest run tests/agent.tool-catalog.test.ts
 pnpm typecheck
 ```
 
-Expected: 全部 PASS（Task 1 的 10 条 + 本任务 19 条 = 29 条）；typecheck 退出码 0。
+Expected: 全部 PASS（Task 1 的 12 条 + 本任务 19 条 = 31 条）；typecheck 退出码 0。
 
 - [ ] **Step 5: 提交**
 
@@ -686,10 +707,8 @@ git commit -m "feat: add tool loading and clearing configuration"
 - Test: `tests/agent.tool-loading.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1/2 的 `ToolLoadingPolicy`、`ToolTier`、`renderCatalog`、`briefDescription`
+- Consumes: Task 1/2 的 `ToolLoadingPolicy`、`ToolTier`、`renderCatalog`、`isNamedTool`、`ACTIVATE_TOOL_NAME`、`SEARCH_TOOL_NAME`
 - Produces:
-  - `const ACTIVATE_TOOL_NAME = 'activate_tools'`
-  - `const SEARCH_TOOL_NAME = 'search_tools'`
   - `interface ToolLoadingOptions { tier: 'catalog' | 'search'; deferrable: StructuredToolInterface[]; alwaysOn: string[]; policy: ToolLoadingPolicy; logger: Logger }`
   - `createToolLoadingMiddleware(options: ToolLoadingOptions): ReturnType<typeof createMiddleware>`
 
@@ -880,15 +899,16 @@ Expected: FAIL —— 无法解析 `../src/agent/tool-loading.js`。
 import { createMiddleware, tool } from 'langchain';
 import { Command, ReducedValue, StateSchema } from '@langchain/langgraph';
 import { ToolMessage } from '@langchain/core/messages';
-import { Runnable } from '@langchain/core/runnables';
 import { z } from 'zod';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { Logger } from '../shared/index.js';
-import { renderCatalog } from './tool-catalog.js';
+import {
+  ACTIVATE_TOOL_NAME,
+  SEARCH_TOOL_NAME,
+  isNamedTool,
+  renderCatalog,
+} from './tool-catalog.js';
 import type { ToolLoadingPolicy } from './tool-catalog.js';
-
-export const ACTIVATE_TOOL_NAME = 'activate_tools';
-export const SEARCH_TOOL_NAME = 'search_tools';
 
 export interface ToolLoadingOptions {
   tier: 'catalog';
@@ -896,10 +916,6 @@ export interface ToolLoadingOptions {
   alwaysOn: string[];
   policy: ToolLoadingPolicy;
   logger: Logger;
-}
-
-function namedTool(value: object): value is StructuredToolInterface {
-  return 'name' in value && typeof value.name === 'string' && Runnable.isRunnable(value);
 }
 
 function createActivateTool(
@@ -968,7 +984,7 @@ export function createToolLoadingMiddleware(
     wrapModelCall: (request, handler) => {
       const active = new Set(request.state.activatedTools);
       const tools = request.tools.filter(
-        (item) => !namedTool(item) || resident.has(item.name) || active.has(item.name),
+        (item) => !isNamedTool(item) || resident.has(item.name) || active.has(item.name),
       );
       const listed = [...active];
       const sections = [
@@ -1094,10 +1110,17 @@ Expected: FAIL —— `tier: 'search'` 不在 `ToolLoadingOptions['tier']` 类�
   tier: 'catalog' | 'search';
 ```
 
-把 `tool-catalog.js` 的 import 补上 `searchCatalog`：
+把 Task 4 已有的 `tool-catalog.js` import 块**补上** `briefDescription` 与 `searchCatalog`，其余名字保留不动：
 
 ```ts
-import { briefDescription, renderCatalog, searchCatalog } from './tool-catalog.js';
+import {
+  ACTIVATE_TOOL_NAME,
+  SEARCH_TOOL_NAME,
+  briefDescription,
+  isNamedTool,
+  renderCatalog,
+  searchCatalog,
+} from './tool-catalog.js';
 ```
 
 在 `createActivateTool` 之后新增：
@@ -1114,7 +1137,7 @@ function createSearchTool(
         return `无匹配，请换个说法或用 ${ACTIVATE_TOOL_NAME} 直接指定名字。`;
       }
       return [
-        '候选工具（尚未激活，需要用 activate_tools 激活后才能调用）:',
+        `候选工具（尚未激活，需要用 ${ACTIVATE_TOOL_NAME} 激活后才能调用）:`,
         ...matches.map((m) => `- ${m.name}: ${briefDescription(m.description)}`),
       ].join('\n');
     },
@@ -1417,12 +1440,10 @@ Expected: FAIL —— 无法解析 `../src/agent/context-clearing.js`。
 
 ```ts
 import { ClearToolUsesEdit, createMiddleware } from 'langchain';
-import { Runnable } from '@langchain/core/runnables';
 import type { BaseMessage } from '@langchain/core/messages';
-import type { StructuredToolInterface } from '@langchain/core/tools';
 import type { Logger } from '../shared/index.js';
 import { countMessageTokens } from './summary.js';
-import { estimateToolTokens } from './tool-catalog.js';
+import { estimateToolTokens, isNamedTool } from './tool-catalog.js';
 
 export interface ToolClearingPolicy {
   enabled: boolean;
@@ -1431,10 +1452,6 @@ export interface ToolClearingPolicy {
 }
 
 export const CLEARED_PLACEHOLDER = '[已清理的工具输出]';
-
-function namedTool(value: object): value is StructuredToolInterface {
-  return 'name' in value && typeof value.name === 'string' && Runnable.isRunnable(value);
-}
 
 /**
  * 复用 SDK 的 ClearToolUsesEdit 算法，但自建外壳：
@@ -1458,7 +1475,7 @@ export function createToolClearingMiddleware(
 
       const messages = [...request.messages];
       const schemaTokens = request.tools.reduce(
-        (sum, item) => (namedTool(item) ? sum + estimateToolTokens(item) : sum),
+        (sum, item) => (isNamedTool(item) ? sum + estimateToolTokens(item) : sum),
         0,
       );
       const before = countMessageTokens(messages) + schemaTokens;
